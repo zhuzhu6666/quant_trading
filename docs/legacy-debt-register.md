@@ -1,37 +1,19 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-09-11 (收口批：删除已满足退出条件的 overlay 冻结/worker 崩溃风暴条目与 supervisor binding 条目；demo 放量批压缩为 CVaR overlay 待决项；21→19 条。同日 CVaR 经 Coordinator 恢复为 3.5，该条目改为持久性待复核。2026-09-13 dsl_auto 积压复核 1,239 并修正退出预算口径为当前默认 500；supervisor 治理链首跳缺口定位为 advisory→V16 bridge 无候选生产者（2026-09-13 `0d77157d` 已补入专员产线，首条 application 待验收）)
+> Last verified: 2026-09-13 (清理批：删除 5 条退出条件已满足的旧账——V16 认知层退役/表已不在且 schema 37/37 ok、CVaR overlay 经 18:00 真实 autonomous 写入后仍为 3.5、emergency close 旧兼容入口零调用方且 20 项严格语义测试绿、live_service 领域重力 L 系列收口（12,694→6,519 行、防腐测试绿）、因子治理重复重算已落地（生产轮次 78–84s vs 历史 697s，V16 claim/finalize+Coordinator effect 证据在案）；21→15 条。同日 dsl_auto 积压复核 1,239 并修正退出预算口径为当前默认 500；supervisor 治理链首跳缺口已补入专员产线（`0d77157d`/`6ed0d878`），首条 application 待开盘验收；CVaR 原始丢失根因未定，作为残余风险留观、无动作)
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归（active / migrating / monitoring / quarantined / regressed）。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
 
 ## 1. 全局收敛
 
-### V16 认知层退役（2026-09-11 登记并当日完成）
-
-- 状态：`resolved`。执行顺序：停写（四张认知表增量归零）→ 载体解耦（扩张授权改由 `posterior_fingerprint` 且 `delegate_factor_governance_cycle` 自行重算校验）→ 代码删除（净 −5.8k 行、−9 个 `/api/ops/brain/*` 端点、`brain_action_plan` 提案来源、5 张表声明）→ 退役前 `pg_dump` 存档 `run_artifacts/v16_cognition_retirement_20260911.dump`（74.9 MB / 6 表）→ v35 迁移删除 6 张表（brain 家族 423MB → 15MB，`current 35 / minimum 35 / ok`）。
-- 保留（活路径，未删）：`v16_brain_command`（命令账本）、`brain_governance_candidate`(+`_review`)（桥接）、`brain_memory`（`agent_briefing.reconcile_trade_review` 在用）、`brain_live_ready_guardrail`（`live_autonomy` 的 `broker_local_divergence` 输入），以及 `backend/services/v16_posterior_arbitration.py`。
-- 退役前事实（只读）：`brain_action_plan_eval` 69,852 行 + payload 182MB、`brain_medium_impact_governance` 36,592 行/114MB、`brain_action_plan` 6,890 行/39MB、`brain_state_snapshot` 20 行、`brain_low_impact_execution` 0 行；每天新增 3–5 千行，消费者只有 `/api/ops/brain/*` 与前端 V16 页，无执行器。
-- 解耦的依赖（原缺口）：`delegate_factor_governance_cycle()` 原要求 `snapshot_id` 非空（由 `BrainStateService.build()` 产出、经 `evolution_orchestrator.factor_v16_handoff.snapshot_id` 传入），使认知快照成为扩张授权的唯一载体；现改为 canonical 推导的 `posterior_fingerprint`，`delegate_factor_governance_cycle` 自行重算并要求完全相等（比原信任调用方 id 更严），manifest 升为 `factor_governance_batch_manifest.v2`。附带修正：旧 handoff 取值键写错（读 `.posterior_fingerprint`，实际是 `.fingerprint`），历史上一直是空串。实测：匹配 → `delegated`；伪造 `0*24` → `posterior_arbitration_fingerprint_mismatch`。
-- 实例佐证：`tests/test_v16_brain_orchestrator.py` 中 6 个 bridge/reissue/cancel 测试在停写前就已空转（守卫 `v16_brain_command` 计数为 0 即 return 恒真：fixture 下物化只产出 3 plan / 3 eval / 2 candidate / 0 command），同批删除；生命周期覆盖由新增的 2 个测试 + `test_governance_contract_convergence.py` / `test_autonomous_evolution_cycle.py` 承担。
-- 未随之删除（历史契约）：`STATE_SCHEMA_LEGACY_BASELINE_TABLES` 仍列这些表名（历史 migration 8/14 会对它们 `ALTER TABLE`，见该常量旁注释），不随现状收缩。
-- 验证：`scripts/state_schema_migrate.py --check` = `current 35 / minimum 35 / ok / mismatches 0`；`pg_class` 中 brain 家族只剩 4 张活表；`/api/health` 200，已删端点 404、保留端点 401；重启后 supervisor_learning / autonomous_learning 正常 executed successfully，backend 与 learning worker 0 ERROR；508 + 578 项域测试全绿；只读探针确认扩张授权通道仍可用。
-
-### demo CVaR overlay 覆盖持久性待复核（2026-09-11 登记并当日恢复）
-
-- 状态：`monitoring`（2026-09-11 01:16 经 Coordinator 恢复：`gmut_2212b60618aa48fc9b10359d51e2dc13`，actor=`operator:zhu`、source=`operator_demo_relaxation`、action=`adjust_demo_cvar_limit`、v16_authority=`operator_bounded_demo_control_exempt`、rollback=`{"risk_cvar_threshold_pct":2.5}`，intent committed / projection current。恢复前后：overlay 行无 cvar 键 → 现含 `risk_cvar_threshold_pct: 3.5`（overlay_hash 51eac920，长度 93,876→93,906）；backend 进程 01:18 起 `config_runtime_drift.drift=false` 且 `overlay_changed_keys` 含该键，readiness blockers 空、latch 清除。）
-- 当前（2026-09-12 代码修复批）：`runtime_config_overlay` 的两条写路径已核实为同一 advisory lock + 事务内 merge；代码层可证明的丢键机制（行存在但 JSON 不可读时静默按空 overlay merge 写回）已 fail-closed（`overlay_json_unreadable`），`legacy_authority_json` 不再被 upsert 清空，overlay 表运行时 DDL 收敛到 `RuntimeConfigOverlayService.ensure_table`。运行态复核条件不变。
-- 根因未定：09-11 00:00 前后 cvar 从 overlay 消失，而 `overlay_authority_rebind` 的 patch 内仍带 3.5；Coordinator 为 merge-only（`target_overlay = _deep_merge(current_overlay, patch)`），消失机制尚未定位，不得假设为一次性事件。
-- 退出：下一次真实 autonomous overlay 写入（factor governance 提交）后复核 cvar 仍为 3.5；若再次丢失，改登记为 overlay 写入方缺陷（多写入者/整行覆盖）并按 §3 收敛到单一写入者。
-- 验证：`select substring(overlay_json from 'risk_cvar_threshold_pct[^,}]*') from runtime.runtime_config_overlay` 应为 3.5。
-
 ### supervisor 经验已进入记忆索引，但自动模板准入仍未达标
 
 - 状态：`monitoring`（2026-09-05 复核修正：验收线收紧为 **tighten 覆盖**——reduce 已按 2026-09-02 用户决定永久关闭（最小手数不可减），不得再作为验收项。2026-09-02：eligible 38 / matured 47，数量超 10 笔门槛；缺 tighten 真实执行证据——55 笔 trace 全为 close（thesis_broken/timeout/regime），盈利仓全由 broker TP 单触发；trend_hold 回吐信号缺失已修（5ba55b47 bar 级评估事件后干预需求可见）；准入仍缺真实干预执行，等待受控试点或策略变更。tighten 代码可达性已验证：`range_capture`/`transition_confirming` 姿态下盈利+回吐≥giveback_tighten_threshold 均有真实 tighten 路径；trend_hold 盈利仓按设计只打标不动作；2026-09-08 `ca23580e` 退役 tighten 硬门——close 经 keep→supportive 计入干预证据，本条剩余验收线为候选链，见下方 2026-09-13 定位）
 - canonical：原始事实由 `canonical_v2.supervisor_trace/counterfactual_review` 承载，学习资格由 `canonical_v2.training_sample_row` 承载，经验检索使用 `experience_memory`，V16 检索/后验使用 `brain_memory` 和 `posterior_arbitration`。
 - 当前（2026-09-08 只读）：`training_sample_row 12978`，`supervisor_execution_trace 9458`中`governance_eligible=1 & matured=53`（数量已超10笔门槛；`matured/full 96`，其余`pending 2755 + excluded 6607`）；`trade_review_outcome 224（eligible 1.0共162，08-28为67/46）`；`event supervisor_trace 104/counterfactual 136/broker_execution 440/position_transition 440/trade_review 256`；`brain_memory 294`、`experience_memory 219`；`selection.v1 candidate_count=0`但已有`profit_protection.v1` governed基线绑定（`bound`，此前`insufficient_evidence/off`），`origin=supervisor` lifecycle行2（09-11 只读：`auto_tpsl.d9daf3a89f.v1`、`auto_mfe_capture_protection.088df78668.v1`，均 SHADOW，出生钩已真实产出）。binding 回溯：新 trace 全 verified（`287557780` 09-10 23:16、`287621843` 09-11 00:35），09-10 00:50 及更早的历史 trace 仍为 `binding_missing`（历史 payload 无 binding，不回填、不伪造）。数量门已过，缺候选review→V16/Coordinator→effect/rollback连续链。
-- 2026-09-13 只读定位（链路断在首跳）：32 条治理合格 suggestion（`policy_suggestion` scope=`position_supervisor_template`）截至 09-10 23:43 全部 `superseded`、零 applied——`autonomous_learning.py:5079` 要求该 scope 建议携带 V16 bridge 证据，而 advisory 产出（`build_position_supervisor_advisories`，evidence 含 replay_summary + counterfactual_summary）无 candidate_id/bridge；`learning_application_log` / `learning_application_effect` 中该 scope 为 0；`brain_governance_candidate` 仅 1 条 supervisor 历史行（08-19 创建、`posterior_not_selected` superseded、24 条 delegated 命令全部 `claim_status=cancelled`/`claim_attempts=0`）；`f16024bb`（09-11）删除 medium-impact 产线后全仓无生产者为该 scope 造 candidate（`create_candidate` 仅 `factor_pruning_governance` 调用）。修链三选一（待决）：① 按新架构补专员自有 `delegate_*` 命令/候选生产者；② 改该 scope 准入条件，承认 advisory 自带 replay+counterfactual 证据；③ 明确停车该 surface。2026-09-13 处置：采用 ①（commit `0d77157d`）——专员经 `V16BrainOrchestratorService.delegate_supervisor_template_switch` 从 advisory 证据产出 candidate+`delegate` 命令，bridge/RiskPolicy(approved)/Coordinator 仍逐层门控；定向测试 197 + smoke 215 通过；首条 candidate/command/application 待下一个带新事实的学习周期验收（闭市周期在 watermark 当前时直接跳过）。同日人工回放 2026-09-10：首跳、复审（修轮换记分 `6ed0d878` 后 `bridge_ready`）、bridge 证据均成立；bridge 因缺 `candidate_template`/`generation_context` 被 apply 侧 supersede 的问题已随 `6ed0d878` 修复；最后一跳 application 待开盘新证据。
+- 2026-09-13 只读定位（链路断在首跳）：32 条治理合格 suggestion（`policy_suggestion` scope=`position_supervisor_template`）截至 09-10 23:43 全部 `superseded`、零 applied——`autonomous_learning.py:5079` 要求该 scope 建议携带 V16 bridge 证据，而 advisory 产出（`build_position_supervisor_advisories`，evidence 含 replay_summary + counterfactual_summary）无 candidate_id/bridge；`learning_application_log` / `learning_application_effect` 中该 scope 为 0；`brain_governance_candidate` 仅 1 条 supervisor 历史行（08-19 创建、`posterior_not_selected` superseded、24 条 delegated 命令全部 `claim_status=cancelled`/`claim_attempts=0`）；`f16024bb`（09-11）删除 medium-impact 产线后全仓无生产者为该 scope 造 candidate（`create_candidate` 仅 `factor_pruning_governance` 调用）。修链三选一（待决）：① 按新架构补专员自有 `delegate_*` 命令/候选生产者；② 改该 scope 准入条件，承认 advisory 自带 replay+counterfactual 证据；③ 明确停车该 surface。2026-09-13 处置：采用 ①（commit `0d77157d`）——专员经 `V16BrainOrchestratorService.delegate_supervisor_template_switch` 从 advisory 证据产出 candidate+`delegate` 命令，bridge/RiskPolicy(approved)/Coordinator 仍逐层门控；定向测试 197 + smoke 215 通过；首条 candidate/command/application 待下一个带新事实的学习周期验收（闭市周期在 watermark 当前时直接跳过）。同日人工回放 2026-09-10：首跳、复审（修轮换记分 `6ed0d878` 后 `bridge_ready`）、bridge 证据均成立；bridge 因缺 `candidate_template`/`generation_context` 被 apply 侧 supersede 的问题已随 `6ed0d878` 修复；最后一跳 application 待开盘新证据。本条当前待验证项：① 首条 application（含 effect observation 与 rollback 痕迹）；② apply 侧通用门 `release_run_required_for_governed_apply` / `replay_freshness_required` 在该 lane 的真实行为未实测（仅在闭市只读 cycle blockers 中观察到）。
 - 自动开启：`off` 仅是无证据时的安全基线；证据投影达到资格后，由 learning worker 自动经 V16、RiskPolicy 和 Coordinator 切入有界 Demo，不需要人工再改一个模式开关。单条 brain memory、提案或未成熟后验仍不能直接授权。
 - 退出：`≥10 笔 governance_eligible matured supervisor_execution_trace` 真实干预（close/tighten 均可，tighten 硬门 2026-09-08 已退役：executed correct close 经 keep→supportive 计入干预证据）+ 候选 review、V16/Coordinator application、effect observation 和 rollback 连续可追溯；selection projection 新鲜且可解释；任何单条记忆不得直接改模板或放大交易权限。
 
@@ -81,23 +63,6 @@
 
 ## 2. 执行与运行时
 
-### emergency close 严格完成语义
-
-- 状态：`migrating`
-- canonical：先持久化 no-new-risk latch；只有 fresh post-reconcile 确认目标 position ID 消失才算 completed。
-- 已收口：`refresh_positions()` / `refresh_account_info()` 兼容入口已删除；安全、恢复和显示读取统一使用显式 reconcile 结果或其只读投影。
-- 退出：所有安全/恢复调用只接受 immutable authoritative reconcile contract。
-
-### live_service 领域重力
-
-- 状态：`migrating`
-- canonical 模块：reconciliation、serial loop、emergency、position protection、open submission/protection/processing、execution recovery 已分离；fresh position reconcile 是既有 `recovery_position_state.recovery_meta.position_path` 的唯一 live 累计写入边界，event/API 投影不写入。
-- 剩余：`live_service` 仍保留 process wiring、兼容状态发布和少量 lifecycle wiring；仓位路径持久化失败必须显式降级为 unknown，不得把单次观测伪装成累计 MFE/MAE。2026-09-12 修复批进展：live state 容器与只读访问器已迁至 `backend/services/live_state_store.py`（唯一写路径留在 live_service），`get_live_bars/get_ctrader/market_session_snapshot/loss_streak_ladder_facts/stop_live_scheduler` 等跨模块消费点全部公共化（30 处私有跨模块导入清零），`_live_state_*` 相关 131 个测试 patch 点部分消解；读投影（get_status/get_account/get_positions/get_live_readiness）与其缓存登记为状态 owner 的合法 HTTP 读边界（依据与清单见 docs/planning/full-repair-2026-09-12.md B3/B4/B5）。
-- 2026-09-13 L 系列收口：`live_service.py` 12,694 → **6,519 行**（−48.6%）。owner 归属固定为：平仓结算/恢复 `live_close_settlement`、开仓管线 `live_open_pipeline`、open filled/amended 处理 `live_open_processing`、保护执行 `live_position_protection_cycle`、supervisor 裁决族（绑定选择/切换状态机/trace/noop 记忆/path metrics/reentry cooldown）`live_supervision_runtime`、bar 预热与决策 bar 新鲜度 `live_bar_warmup`、safety watchdog（含单例）`live_safety_watchdog`、safety plane 单例入口 `live_safety_plane`、safety 只读 planner runtime `live_safety_planner`、tick 风险指标发布 `live_loop_tick_runtime`、factor 初始化适配器 `live_factor_bootstrap`；live_service 只保留 runtime 组装、薄 facade 名字、串行 tick 决策引擎、读投影与进程生命周期。同一事实仍只有一个生产计算者：搬移只改回调实现位置，不改 authority。剩余：永驻部分按登记册口径不再拆。
-- 提取器教训（已修，防腐测试在案）：`_live_service()` 惰性回引必须由 token 级重写生成——文本正则曾把循环/推导式局部名与字符串字面量改成 `_live_service().<local>`，其中 L3b/L6/L7 已落地过（`factor_generation_active` 必抛 AttributeError、forward-VaR 输入静默降级），由 `32abcea5` 修复，并在 `tests/test_live_service_facade_boundaries.py` 增加静态校验防止复发。
-- 验证：启动暖机优先使用 cTrader 在线历史，月初当月月库为空或 broker history 不可用时再通过 `bars_monthly_read_paths()` 回读最近历史闭合 bar；live bar freshness、风险和 readiness 以 online trendbar frame 为准，月库只作低频副本与离线兜底。
-- 退出：只迁出真实决策/状态机；不为“拆文件”新增 wrapper。稳定发布后删除旧 globals 和 compatibility authority。
-
 ### live tick safety 阶段耗时远超节奏（2026-09-10 登记）
 
 - 状态：`active`（只读观测：tick 名义节奏 5s，`safety timing` 显示单 tick `total` 常在 5~122s，`safety=` 段是主因；内存/readiness 批次与该耗时无关，修完尖峰后耗时无改善）
@@ -110,17 +75,6 @@
 - 验证：`grep -a "safety timing" logs/live_loop.log | tail -50`。
 
 ## 3. 治理、研究与客户端
-
-### 因子治理重复重算与固定候选错配（2026-08-30）
-
-- 状态：`monitoring`（2026-09-01 代码层复核+重构：`build_factor_catalog` 10处分支已收敛为 `_maybe_refresh_catalog` 单helper，条件重建；剩余130秒为审计/投影写入，非目录重建）
-- canonical：因子目录仍由 `build_factor_catalog` 唯一生成；Canonical 决策快照仍是冗余分析和学习证据的只读事实；V16 仍以单候选、固定 manifest 委派扩张 mutation。
-- 已确认根因：`run_cycle` 用累计 action 触发后续目录重建；shadow 绩效、决策快照、review payload 和 admission evidence 存在 N+1/重复全量扫描；冗余 group 数被当作候选数但没有具体候选，导致 V16 固定候选合同无法执行。
-- 已修复：按阶段 action 只在真实 mutation 后刷新目录；shadow 绩效和冗余快照改为批量读取；学习/卡片复用已解码的 Canonical payload；review freshness 一次聚合；参数模板在同一卡片快照内复用；冗余报告生成一个具体配置 mutation candidate，并限制执行只能消费该 V16 candidate；无变化时不生成 mutation 或重复目录重建。
-- 验证：历史实测治理轮次约 `697.3s`；本次只读复测目录约 `0.5–3.4s`、冗余约 `2.6s`、因子卡片约 `5.8s`、参数推荐约 `7.0s`；受影响测试 `179 passed`，全量 `2966 passed, 11 skipped`。
-- 真实复测：手动写入型 run `manual_perf_dcb5122c200b` 总耗时 `142.091s`，治理 run `132.040s`，因无当前 V16 command 正常 `blocked_by_v16_command` 且无 mutation；随后正式 `evolution_hourly` 日志 `138.6s`、治理 run `130.787s`。这相对历史 `697.3s` 已显著下降，但仍高于只读探针，剩余主要是逐 action 审计/投影写入耗时，不能宣称已完成性能收口。
-- 测试垃圾清理：仅删除上述唯一 run 的 20 条 suggestion、1 条 catalog snapshot、40 条 runtime decision、20 个独占 API mutation payload 和 1 条 run；Canonical V2 40 条不可变事件保留，未删除任何有用事实或仍被引用的 payload。
-- 剩余：发布后仍需以正式版本 PID/日志和真实 V16 claim/finalize、Coordinator projection/effect 证据完成治理验收。不因性能修复删除 Canonical 事实、治理账本或仍有引用的历史记录。
 
 ### PostgreSQL 重复写入与写放大（2026-08-30）
 
@@ -183,11 +137,10 @@
 - 状态：`active`（A3 盘点草案；学习主环切换为开仓证据 meta-labeling 后，以下对象失去存在理由，按批次退役）
 - canonical：本清单为唯一退役对象列表；替代对象为 3–6 个生产信号的最小健康监控 + `open_quality_lightgbm` live shadow 链（本批已接入 `live_service._evaluate_open_quality_model_veto` 无策略分支，mode=`live_shadow`，纯观察 fail-open）。
 - 剩余（按退役顺序）：
-  1. GP/canary 因子工厂宽度机器——`dsl_auto` SHADOW 积压（2026-09-08为1712）排空后，退役 GP 注册、canary 阶梯批量评估、DSL 批量准入路径；supervisor出生钩（`register_supervisor_shadow`，origin=supervisor隔离alpha/背压）已随09-08 12:54重启加载但生产0行，待首个auto模板；
+  1. GP/canary 因子工厂宽度机器——`dsl_auto` SHADOW 积压（2026-09-13为1,239）排空后，退役 GP 注册、canary 阶梯批量评估、DSL 批量准入路径；supervisor出生钩（`register_supervisor_shadow`，origin=supervisor隔离alpha/背压）已真实产出（2026-09-13 advisory 回放 committed `auto_overprotection_relief.bfabfc4bed.v1`）；
   2. `backtrader` / `APScheduler` 依赖声明（各仅 1 处引用）——二选一：删除声明或真实启用，不得长期双挂；
   3. `backend/services/` 中 18 个 <120 行单调用方壳层——内联；
-  4. `live_service.py`（12.6k 行）领域重力——按执行/恢复/投影拆分归主；
-  5. 451 个 reason code 收敛与 72 张 runtime 投影表并表——生产因子收缩后审计面同步收敛。
+  4. 451 个 reason code 收敛与 72 张 runtime 投影表并表——生产因子收缩后审计面同步收敛。
 - 退出：每批满足"替代已运行 + 针对性测试 + 全量回归绿 + 净删除为正"方可标记 resolved；shadow 写入分支的退出条件为模型 influence veto（demo_canary）稳定运行 ≥100 笔后复核是否保留为 fail-open 兜底。
 - 验证：`run_artifacts/baseline_comparison/`（A2 基线 PASS，2026-09-05）与 `run_artifacts/open_quality_validation/`（holdout AUC 0.40，过拟合实证，enforce 不准入）为本批决策留档。
 
@@ -211,6 +164,8 @@
 ## 4. 明确退役，禁止恢复
 
 - 旧 PostgreSQL `state_v1` schema 及其数据；生产只使用 `runtime` 与 `canonical_v2`；
+- V16 认知层账本（`brain_action_plan`(+`_eval`/`_payload`)、`brain_medium_impact_governance`、`brain_state_snapshot`、`brain_low_impact_execution`）与 medium-impact 候选产线（2026-09-11 退役，证据留 `run_artifacts/v16_cognition_retirement_20260911.dump`）；
+- emergency close 的 `refresh_positions` / `refresh_account_info` 旧兼容入口（零调用方，严格完成语义只能由 fresh post-reconcile 证明）；
 - SQLite `data/state.db` 运行态主库；
 - 历史 tick 采集与 `ticks.duckdb`；
 - L2 collector、depth 风控字段与历史 L2 库；
