@@ -270,4 +270,12 @@ test_live_service_lifecycle(163) / test_factor_governance_orchestrator(96) / tes
 - 两个假阳性教训（后续批次沿用）：① pyflakes `redefinition of unused` 不计函数内使用，不能据此删任一侧；② `try/except ImportError` 里的导入是可导入性探针（`_make_ctrader_bridge` / `get_ctrader` 的 CTraderBridge），import 即语义，常驻告警保留。
 - 验证：pyflakes 三文件仅剩 7 个有证据的常驻告警；目标测试 178 passed（facade boundaries/tick/generation/session_restore/bar_dedup/protection_cycle/entry_barrier/recovery_gate/safety_watchdog/new_risk_gate/ops_governance + test_model_influence 别名防漏）；smoke 215 passed。改动待下次受控重启生效。
 
+### 运行态验收（2026-09-13 14:12 受控重启，用户授权，done，commit be8e8932）
+- 只读预检：schema `current 37 / minimum 37 / ok`；`live.loop.desired_state enabled=true`（broker=ctrader）；`live.loop.last_shutdown` graceful=true / ownership_released=true / recovery_required=false。
+- 重启：backend 14:12:52 → workers 14:13:34/14:13:35；三服务 active。
+- 验收：release_identity `head=be8e8932`、`clean=true`（923 文件指纹）；`/api/health` ok（db/ctrader connected）；公网 `https://www.zhuzhu666.icu/api/health` 200；启动即 `RuntimeConfig autonomous overlay restored hash=57ad9b8c`（与 03:09 批一致，overlay 内容含 cvar=3.5 未变）、无 `governance_authority` 闩；loop 自持久化 desired state 自动恢复（generation `316f6075-0f5f-4769-aebd-18cd4452dbe1`），bar warmup 501 bars、低频因子 warmup 正常、recovery bootstrap 确认无 broker 持仓；`backend_readiness_snapshot.v1` blockers=[]；`runtime_health_projection.v1` live_loop running；learning worker overlay restored（同 hash）+ databases initialized；**三服务 journal `ERROR|Traceback` 计数均为 0**。
+- 瞬态记录（非回归）：readiness 首建快照（14:14:05，启动约 1 分钟）曾报 `system_health_snapshot_unavailable`，为 monitor 首个 system_health 快照落地前的启动窗口，14:16:05 重建后 `blockers=[]`。
+- 对照项：`system_health` 报 `live_loop=degraded score=0.90 errors=1`，重启前后同值同 detail，属闭市本地 tick 探针姿态；`market_session.can_open_positions=false`（周日闭市）。
+- 待周一开盘复核（不阻塞）：safety timing p95。
+
 - 每批配方（下一轮沿用）：v3 抽取脚本（token 重写 + 作用域 + 碰撞 abort + 跨模块重定向）→ pyflakes 零新增 → 目标测试 → smoke → 全量门 → commit。
