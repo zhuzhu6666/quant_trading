@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Last verified: 2026-09-14 (entry_cluster 补 actuator 批：stepper/runner/Coordinator/live 路由与单一 bucket 解码，生产落地首条同向冷却控制并做 live 路径 A/B 探针；第三次受控重启后重取 replay 准入；§3.7 更新)
+> Last verified: 2026-09-14 (学习任务提速批：回放整条链 520s→23.1s、治理收紧阶段 75~150s→~10s；受控重启后重取 replay 准入 ok/fresh；§2 更新)
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -19,15 +19,16 @@
 
 静态发布开关（`config/settings.yaml[features]`，operator-only、随重启生效）：`live_safety_plane_v2_mode=enforce`、`governance_mutation_coordinator_v2_mode=enforce`；PG job queue 状态见 [legacy-debt-register.md](legacy-debt-register.md) 与 SSoT §2。
 
-## 2. 最近一次只读核对（2026-09-14 00:21 第三次受控重启）
+## 2. 最近一次只读核对（2026-09-14 03:21 受控重启：学习任务提速批）
 
-- **服务**：`quant-backend` active since 2026-09-14 00:21:26、`quant-learning-worker` active since 2026-09-14 00:21:17、`quant-job-worker` active since 2026-09-13 18:47:50（`systemctl is-active` / `ActiveEnterTimestamp`；`NRestarts=0`）。
+- **服务**：`quant-backend` / `quant-learning-worker` / `quant-job-worker` active since 2026-09-14 03:21:43（`systemctl is-active` / `ActiveEnterTimestamp`；`NRestarts=0`）。启动即 `overlay restored hash=a03704a7…`、`DataStore warmed up`、live loop 自动接回（`recovery bootstrap confirmed broker has no open positions`）、三服务 journal 零 warning。
 - **状态库**：migration ledger `current 37 / minimum 37 / ok / mismatches 0`（`scripts/state_schema_migrate.py --check`）。
-- **代码**：`entry_cluster` 补 actuator——`backend/services/entry_cluster_governance.py`（新增）、stepper step `apply_entry_cluster_control` 与 pending 口径、runner allowlist、Coordinator 对 `same_direction_cooldown` 的收紧分类、`risk.policy_service` 的 `activate_entry_cluster_control` 路由、`live_learning_policy.entry_cluster_threshold` 单一解码。进程已随 00:21 受控重启加载。
-- **readiness**：`backend_readiness_snapshot.v1` `ok=true`、`blockers=[]`、`ready_for_live_execution=false`（休市 `market_session_blocks_open`）；`runtime_health_projection.v1` ctrader connected、无持仓；`market_session_status=closed_confirmed`（休市窗口 open 预期被阻断）。
-- **本批验证**：`tests/test_entry_cluster_governance.py` 2 passed、`tests/test_governance_mutation_coordinator.py` + `tests/test_entry_quality_governance.py` + `tests/test_governance_runtime_controls.py` + `tests/test_governance_control_plans.py` + `tests/backend/runtime/` 113 passed、`pytest -m smoke` 215 passed；migration/OpenAPI 无变更。
-- **生产应用与 live 消费**：`psg_entry_cluster_7a728f32…` → mutation `gmut_5c0b3daa78954bc39be13698d17f8544`（`committed` / `risk_class=risk_tightening` / `control_surface=entry_cluster` / `scope_key=same_direction_ge_1`）、`learning_application_log` `observing`；live 投影 `active=True min_same_direction_open_count=1`；只读探针 A/B：同一方向第 2 笔在首笔后 30s 时 `learning_same_direction_cooldown`（`blocked_by=entry_cluster_learning_policy`），关闭该控制后同一上下文 `ok`。
-- **replay 准入**：代码变更后重取报告 `bar_replay_88ffb032b1044dfb` grade A（decisions 80 / matched 80 / bar-window mismatch 12），`ReplayHarnessService.status()` `ok=True / fresh / blockers=[]`、config/code 绑定一致、`risk_policy_recompute` disagreement 0 / live_state_gap 47，与上一份报告指标逐项相同。
+- **代码**：学习任务提速批（4 文件 +171/−10，**尚未提交**）——`data/duckdb_store.py` 有范围读取按 UTC 月份筛月库（±1 月保险边距）、`data/external_loader.py` 用等价滑窗 `_trailing_rank` 替换宏观排名逐行循环、`backend/services/replay_harness.py` 决策加载时间过滤下推、`backend/runtime/factor_governance_orchestrator.py` 治理周期内一次性实验台账索引 + 候选评估前批量预热准入证据；新增 `tests/test_bars_month_range_filter.py`。
+- **实测提速**（同机同数据，改动前后对比）：回放整条链 520s → **23.1s**；单次范围取 K 线 3.6s → 0.044s；治理收紧阶段候选筛选 43~49s → 0.02s、候选评估 7s/个 → 0.005s/个（批量预热 9.0s 覆盖全部 1896 个 id）。
+- **readiness**：`backend_readiness_snapshot.v1` `ok=true`、`blockers=[]`、`ready_for_release=true`；`ready_for_live_execution=false` 仍为休市 `market_session_blocks_open`（`closed_confirmed`）；ctrader connected、无持仓。
+- **replay 准入**：改动后重取报告 `bar_replay_c0d4abe3eac042ea` grade A（decisions 80 / matched 80 / bar-window mismatch 12），`ReplayHarnessService.status()` `ok=True / fresh / blockers=[]`、code/config 绑定一致、指标与上一份报告逐项相同。
+- **本批验证**：新增测试 1 passed（并注入错误过滤确认该测试会失败）；`tests/backend/runtime/test_factor_governance_orchestrator.py` 55 passed；回放/监督/外部数据 71 passed；`tests/data/` 32 passed；`pytest -m smoke` 215 passed；migration/OpenAPI 无变更。
+- **待开盘复核（本批）**：① 第一个完整治理周期的实测耗时（休市轮次 0.26s 是门控跳过，未走收紧阶段）；② 培育周期触发回放时的实际耗时（预期 ≤30s）；③ 与既有的开盘待验项（因子闭环、学习建议应用、监督候选链、慢 tick 采样）一并取数。
 
 ## 3. 未完成 / 待复核证据
 
