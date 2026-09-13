@@ -242,3 +242,5 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 - ⏳ 最后一跳 application 未在本日完成：09-10 回放身份已被前一次 supersede 消耗（advisory 建议 deterministic id 已终态，`ON CONFLICT` 不复活），复审后 `target_template_not_registered`；等待下一个带新事实的周期（开盘后）用新证据完成 `bridge → approved → RiskPolicy → V16 claim → Coordinator → application`。
 
 回放写入均为惰性治理事实（candidate/command/review/suggestion，无 application；候选 24h 过期），不影响交易链。
+
+第二次受控重启（2026-09-13 18:46，用户授权，加载 `6ed0d878`）：只读预检 schema `37/37 ok`、loop enabled、no open positions；重启 backend 18:46:32 → workers 18:47:44/18:47:50；release_identity `head=9f7cb2e8`、`clean=true`；三服务 journal `ERROR|Traceback` 均为 0；readiness `blockers=[]`；loop 自动恢复 generation `e4ed0c62`；overlay restored `hash=a03704a7`。该 overlay hash 变化（前值 `57ad9b8c`）来源已核实为回放触发的 `register_supervisor_shadow` governed mutation（`0d6f49ce-d98e-50ea-98ac-b6e15993c314`，actor `system:supervisor_governance`，18:00 committed，run_id `factor_lifecycle:position_supervisor:auto_overprotection_relief.bfabfc4bed.v1`），属出生钩设计行为，不是配置漂移。
