@@ -16,30 +16,26 @@ hand. v8 added real thread management so the Web 总览 can drive the
 trading loop from the browser.)
 """
 import copy
-from dataclasses import asdict, is_dataclass
+from dataclasses import is_dataclass
 from functools import partial
-from pathlib import Path
 import threading
 import time
 import traceback
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 from typing import Any, Mapping
 
 from loguru import logger
 
 import os
 import pandas as pd
-import numpy as _np
 from pathlib import Path
 
 from backend.ledger.service import DecisionLedger
 from alpha.reflection.reviewer import TradeReviewer
 from research.learning.experience_builder import ExperienceBuilder
 from research.learning.policy_suggester import PolicySuggester
-from risk.policy_service import INCIDENT_MODE_RANK, RiskPolicyService, RiskVerdict
+from risk.policy_service import RiskPolicyService, RiskVerdict
 from risk.runtime_policy import RiskLimitSnapshot
-from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.core.static_feature_flags import shared_static_feature_flags
 from backend.services.live_loop_controller import LiveLoopController
 from backend.services.live_safety_plane import SafetyCandidate
@@ -62,16 +58,12 @@ from backend.services.live_safety_shadow_observation import (
 from backend.services.live_safety_watchdog import (
     evaluate_safety_freshness,
 )
-from backend.core.db import state_table_columns
 from backend.services.canonical_v2_reader import (
     canonical_ready,
     iter_decision_rows,
-    iter_supervisor_trace_rows,
-    load_position_decision_index,
 )
 from backend.services.live_reconciliation import (
     LIVE_SAFETY_FRESHNESS_SEC as _LIVE_SAFETY_FRESHNESS_SEC,
-    evaluate_reconciliation_snapshot as _evaluate_reconciliation_snapshot,
     explicit_account_reconcile as _explicit_account_reconcile,
     explicit_position_reconcile as _explicit_position_reconcile,
     fresh_observation_timestamp as _fresh_observation_timestamp,
@@ -108,8 +100,6 @@ from backend.services.live_loop_tick_runtime import (
 )
 from backend.services.live_execution_recovery import (
     ExecutionRecoveryRuntime,
-    PositionRecoveryRuntime,
-    bootstrap_position_recovery as _runtime_bootstrap_position_recovery,
     recover_emergency_execution_intents as _runtime_recover_emergency_intents,
     recover_execution_outcomes_before_alpha as _loop_recover_execution_outcomes,
 )
@@ -122,10 +112,6 @@ from backend.services.live_entry_protection import (
     EntryProtectionLatchRuntime,
     activate_entry_protection_pending_latch as _entry_protection_activate_latch,
     release_entry_protection_pending_latch as _entry_protection_release_latch,
-)
-from backend.services.live_open_admission import (
-    evaluate_final_open_admission as _evaluate_final_open_admission,
-    probe_postgres_authority as _probe_postgres_authority,
 )
 from backend.services.live_open_risk_context import (
     OpenLearningContextRuntime,
@@ -155,16 +141,6 @@ from backend.services.live_position_protection_cycle import (
     PositionProtectionCycleRuntime,
     run_position_protection_cycle as _runtime_run_position_protection_cycle,
 )
-from backend.services.live_recovery_position_store import (
-    RecoveryPositionStore,
-    RecoveryPositionStoreRuntime,
-)
-from backend.services.live_recovery_close import (
-    MissingPositionRetirementRuntime,
-    RecoveredCloseReplayRuntime,
-    replay_recovered_close as _runtime_replay_recovered_close,
-    retire_broker_missing_position as _runtime_retire_missing_position,
-)
 from backend.services.live_closed_position_cycle import (
     ClosedPositionCycleRuntime,
     handle_closed_positions_after_tick as _runtime_handle_closed_positions,
@@ -176,27 +152,6 @@ from backend.services.live_closed_position_processing import (
     log_closed_position_ledger as _runtime_log_closed_position_ledger,
     run_closed_position_learning as _runtime_run_closed_position_learning,
 )
-from backend.services.live_open_submission import (
-    OpenSubmissionRuntime,
-    finalize_nursery_reservation as _runtime_finalize_nursery_reservation,
-    submit_open_trade_candidate as _runtime_submit_open_trade_candidate,
-)
-from backend.services.live_open_protection import (
-    OpenProtectionRequest,
-    OpenProtectionRuntime,
-    attach_open_trade_protection as _runtime_attach_open_trade_protection,
-)
-from backend.services.live_open_processing import (
-    AmendFailureRequest,
-    AmendFailureRuntime,
-    AmendedOpenSuccessRequest,
-    AmendedOpenSuccessRuntime,
-    FilledOpenRequest,
-    FilledOpenRuntime,
-    record_amend_failure_after_fill as _runtime_record_amend_failure,
-    record_amended_open_success_context as _runtime_record_amended_success,
-    record_filled_position_open_context as _runtime_record_filled_open,
-)
 from backend.services.live_risk_reduction import (
     RiskReductionRuntime,
     build_close_position_risk_context as _risk_reduction_build_close_context,
@@ -204,20 +159,14 @@ from backend.services.live_risk_reduction import (
     load_recovery_row_for_risk_reduction as _risk_reduction_load_recovery_row,
     lookup_entry_context_for_risk_reduction as _risk_reduction_lookup_entry_context,
     lookup_entry_decision_for_risk_reduction as _risk_reduction_lookup_entry_decision,
-    record_risk_reduction_aux_failure as _risk_reduction_record_aux_failure,
 )
 from backend.services.market_session import evaluate_market_session
 from backend.services.review_contract import build_entry_timing_context
 from backend.services.live_runtime_state import (
     cache_get_or_refresh as _runtime_cache_get_or_refresh,
-    default_live_state,
     safe_container_snapshot as _safe_container_snapshot,
-    state_get as _runtime_state_get,
-    state_set as _runtime_state_set,
-    state_update as _runtime_state_update,
 )
 from backend.services import live_close_settlement
-from backend.services import live_open_processing
 from backend.services import live_open_pipeline
 from backend.services import live_bar_warmup
 from backend.services import live_factor_bootstrap
@@ -236,13 +185,7 @@ from backend.services.live_state_store import (
     live_state_update,
 )
 from backend.services.session_restore import (
-    PartialCloseSessionFactRuntime,
     authoritative_close_pnl as _authoritative_close_pnl,
-    build_authoritative_session_state as _session_build_authoritative_state,
-    load_authoritative_session_deal_facts as _session_load_authoritative_deal_facts,
-    resolve_session_restore as _session_resolve_restore,
-    session_trade_window as _session_restore_trade_window,
-    sync_partial_close_session_fact as _session_sync_partial_close_fact,
 )
 from backend.services.live_ctrader_runtime import CTraderRuntime
 from backend.services.live_data_sync_job import make_data_sync_job as _make_data_sync_job
@@ -257,14 +200,11 @@ from backend.services.live_factor_state import (
     resolve_decision_bar_progress as _factor_state_resolve_bar_progress,
 )
 from config.runtime_config import (
-    autonomy_expansion_freeze_applies,
     bounded_demo_mode_active,
 )
 from backend.services.live_loop_shell import (
     acknowledge_prepared_factor_projections as _loop_ack_prepared_factor_projections,
-    compare_spot_quote_to_latest_bar as _loop_compare_spot_quote_to_latest_bar,
     apply_factor_pipeline_config_update as _loop_apply_factor_pipeline_config_update,
-    bridge_readiness_label as _loop_bridge_readiness_label,
     build_extra_symbol_factor_pipelines as _loop_build_extra_symbol_factor_pipelines,
     collect_open_risk_runtime_health as _loop_collect_open_risk_runtime_health,
     cross_asset_symbols_for_config as _loop_cross_asset_symbols_for_config,
@@ -272,7 +212,6 @@ from backend.services.live_loop_shell import (
     enabled_symbols_from_config as _loop_enabled_symbols_from_config,
     execution_gate_config as _loop_execution_gate_config,
     loop_identity_snapshot as _loop_identity_snapshot,
-    market_closed_log_message as _loop_market_closed_log_message,
     mark_loop_stopped_for_display as _loop_mark_stopped_for_display,
     subscribe_spot_once as _loop_subscribe_spot_once,
     unique_factor_pipelines as _loop_unique_factor_pipelines,
@@ -322,14 +261,7 @@ from backend.services.live_tick_pipeline import (
     guard_current_price_with_spot_quote as _tick_guard_current_price_with_spot_quote,
     build_signal_log_suffix as _tick_build_signal_log_suffix,
     build_close_ledger_payloads as _tick_build_close_ledger_payloads,
-    build_effective_event_sizing_payload as _tick_build_effective_event_sizing_payload,
-    build_amend_failed_ledger_payloads as _tick_build_amend_failed_ledger_payloads,
     build_trade_review_payload as _tick_build_trade_review_payload,
-    build_market_order_block as _tick_build_market_order_block,
-    build_open_order_preflight as _tick_build_open_order_preflight,
-    build_open_ledger_payloads as _tick_build_open_ledger_payloads,
-    build_order_failed_ledger_payloads as _tick_build_order_failed_ledger_payloads,
-    build_skip_ledger_payload as _tick_build_skip_ledger_payload,
     collect_position_ids as _tick_collect_position_ids,
     normalize_live_positions_payload as _tick_normalize_live_positions_payload,
     resolve_closed_position_ids as _tick_resolve_closed_position_ids,
@@ -340,40 +272,28 @@ from backend.services.live_tick_pipeline import (
 )
 from backend.services.live_position_lifecycle import (
     active_pending_open_attach_ids as _lifecycle_active_pending_open_attach_ids,
-    adjust_sl_plan_for_tp_only_protection as _lifecycle_adjust_sl_plan_for_tp_only_protection,
     apply_unrealized_pnl_fields as _lifecycle_apply_unrealized_pnl_fields,
-    build_applied_entry_protection_plan_payload as _lifecycle_build_applied_entry_protection_plan_payload,
     build_bar_context_snapshot as _lifecycle_build_bar_context_snapshot,
     build_close_position_risk_context_payload as _lifecycle_build_close_position_risk_context_payload,
     build_decision_quality_context as _lifecycle_build_decision_quality_context,
     build_entry_cluster_context as _lifecycle_build_entry_cluster_context,
-    build_filled_open_ledger_payloads as _lifecycle_build_filled_open_ledger_payloads,
-    build_filled_open_recovery_payloads as _lifecycle_build_filled_open_recovery_payloads,
     build_entry_protection_plan_payload as _lifecycle_build_entry_protection_plan_payload,
     build_holding_summary_from_close_context as _lifecycle_build_holding_summary_from_close_context,
-    build_holding_timeout_market_budget as _lifecycle_build_holding_timeout_market_budget,
     build_holding_timeout_result_trace_fields as _lifecycle_build_holding_timeout_result_trace_fields,
     build_holding_timeout_verdict_payload as _lifecycle_build_holding_timeout_verdict_payload,
     build_market_micro_context_payload as _lifecycle_build_market_micro_context_payload,
     build_open_learning_context_payload as _lifecycle_build_open_learning_context_payload,
     build_open_decision_replay_payload as _lifecycle_build_open_decision_replay_payload,
-    validate_open_learning_context as _lifecycle_validate_open_learning_context,
     build_open_trade_risk_context_payload as _lifecycle_build_open_trade_risk_context_payload,
     build_position_path_metrics_update as _lifecycle_build_position_path_metrics_update,
     build_position_path_metrics_inputs as _lifecycle_build_position_path_metrics_inputs,
-    build_replayed_close_payloads as _lifecycle_build_replayed_close_payloads,
-    build_recovered_open_ledger_payloads as _lifecycle_build_recovered_open_ledger_payloads,
     build_protection_execution_plan as _lifecycle_build_protection_execution_plan,
     build_protection_execution_result_payloads as _lifecycle_build_protection_execution_result_payloads,
     market_open_seconds_between as _lifecycle_market_open_seconds_between,
     build_position_protection_cycle_result as _lifecycle_build_position_protection_cycle_result,
     build_protection_candidate_verdict_payload as _lifecycle_build_protection_candidate_verdict_payload,
     build_protection_candidate_risk_context_from_candidate as _lifecycle_build_protection_candidate_risk_context_from_candidate,
-    build_protection_execution_trace_fields as _lifecycle_build_protection_execution_trace_fields,
-    build_protection_position_event_details as _lifecycle_build_protection_position_event_details,
     build_protection_state_upsert_payload as _lifecycle_build_protection_state_upsert_payload,
-    build_recovery_closed_update_payload as _lifecycle_build_recovery_closed_update_payload,
-    build_recovery_meta_update_payload as _lifecycle_build_recovery_meta_update_payload,
     build_risk_state_with_policy_verdict as _lifecycle_build_risk_state_with_policy_verdict,
     build_pending_supervisor_reentry_block_payload as _lifecycle_build_pending_supervisor_reentry_block_payload,
     build_supervisor_reentry_block_payload as _lifecycle_build_supervisor_reentry_block_payload,
@@ -383,23 +303,13 @@ from backend.services.live_position_lifecycle import (
     build_supervisor_tighten_execution_plan as _lifecycle_build_supervisor_tighten_execution_plan,
     build_supervisor_tighten_result_payloads as _lifecycle_build_supervisor_tighten_result_payloads,
     build_trade_attribution_payload_from_composite as _lifecycle_build_trade_attribution_payload_from_composite,
-    classify_close_source_from_evidence as _lifecycle_classify_close_source_from_evidence,
     classify_trading_session as _lifecycle_classify_trading_session,
-    consume_close_reason as _lifecycle_consume_close_reason,
-    consume_close_verdict as _lifecycle_consume_close_verdict,
     current_regime_hint_from_composite as _lifecycle_current_regime_hint_from_composite,
     estimate_close_pnl_from_state as _lifecycle_estimate_close_pnl_from_state,
     entry_quality_gate_from_learning_policy as _lifecycle_entry_quality_gate_from_learning_policy,
     float_payload_value as _lifecycle_float_payload_value,
-    filter_removed_live_position as _lifecycle_filter_removed_live_position,
-    forget_pending_close_state as _lifecycle_forget_pending_close_state,
     holding_timeout_is_expired as _lifecycle_holding_timeout_is_expired,
-    latest_close_evidence as _lifecycle_latest_close_evidence,
-    normalize_protection_trace_row as _lifecycle_normalize_protection_trace_row,
-    normalize_recovery_position_row as _lifecycle_normalize_recovery_position_row,
-    normalize_supervisor_event_row as _lifecycle_normalize_supervisor_event_row,
     payload_get as _lifecycle_payload_get,
-    normalize_position_snapshot as _lifecycle_normalize_position_snapshot,
     position_api_volume as _lifecycle_position_api_volume,
     position_direction_from_payload as _lifecycle_position_direction_from_payload,
     position_direction_sign as _lifecycle_position_direction_sign,
@@ -409,11 +319,7 @@ from backend.services.live_position_lifecycle import (
     position_symbol_value as _lifecycle_position_symbol_value,
     position_unrealized_pnl as _lifecycle_position_unrealized_pnl,
     remember_pending_open_attach as _lifecycle_remember_pending_open_attach,
-    remember_close_reason as _lifecycle_remember_close_reason,
-    remember_close_verdict as _lifecycle_remember_close_verdict,
     recovery_active_position_ids as _lifecycle_recovery_active_position_ids,
-    recovery_missing_position_ids as _lifecycle_recovery_missing_position_ids,
-    recovery_replay_lookback_from as _lifecycle_recovery_replay_lookback_from,
     max_abs_entry_score_for_positions as _lifecycle_max_abs_entry_score_for_positions,
     restore_attribution_for_positions as _lifecycle_restore_attribution_for_positions,
     same_symbol_position as _lifecycle_same_symbol_position,
@@ -2374,7 +2280,6 @@ def schedule_auto_resume_loop(delay_sec: float = _AUTO_RESUME_DELAY_SEC) -> bool
 # 每次都走 get_ctrader → bridge.account_info → _send (Twisted deferred) .
 # cTrader Open API 是顺序协议, 同时多个 _send 互等导致延迟/超时.
 # 加 5s TTL 缓存, WS 1s 推读缓存, 缓解 reactor 竞争.
-import time as _time
 _ACCOUNT_CACHE: dict[str, tuple[float, dict]] = {}
 _POSITIONS_CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = 15.0  # 15s 避免 WS 1s 推 + HTTP 5s 轮询同时击中 reactor
@@ -2404,6 +2309,7 @@ def _make_ctrader_bridge(**overrides):
     except Exception as _e:
         logger.debug("load_env failed (non-critical): {}", _e)
     try:
+        # 可导入性探针: 库未装时在此 fail-closed, 名字本身不读取 (pyflakes unused 属预期)
         from execution.ctrader_bridge import CTraderBridge
     except ImportError as e:
         return None, f"ctrader-open-api not installed: {e}"
@@ -2555,6 +2461,7 @@ def get_ctrader():
     except Exception as _e:
         logger.debug("load_env failed (non-critical): {}", _e)
     try:
+        # 可导入性探针: 库未装时在此 fail-closed, 名字本身不读取 (pyflakes unused 属预期)
         from execution.ctrader_bridge import CTraderBridge
     except ImportError as e:
         return None, f"ctrader-open-api not installed: {e}", False
@@ -4635,7 +4542,6 @@ def _process_tick(
     protection_already_run: bool = False,
 ) -> None:
     """处理一根新 bar — 全部由 Factor Takeover v4 因子管道驱动。"""
-    global _factor_pipeline
     if _factor_pipeline is not None:
         try:
             result = _process_tick_factor_pipeline(
@@ -4669,12 +4575,12 @@ _factor_pipeline: dict | None = None  # {engine, normalizer, compositor, gate}
 _factor_pipeline_lock = threading.Lock()
 
 # Phase 4: 执行质量分析器
-from execution.analytics import ExecutionQuality, TradeExecution as _ExecTrade
+from execution.analytics import ExecutionQuality
 _exec_quality = ExecutionQuality(max_records=500)
 
 # Phase 6: 多品种并行管道
 _factor_pipelines: dict[str, dict] = {}  # {symbol: {engine, normalizer, ...}}
-_cross_asset_covar: "CrossAssetCovariance | None" = None  # 跨品种协方差
+_cross_asset_covar = None  # 跨品种协方差 (risk.cross_asset.CrossAssetCovariance, 经 covariance_cls 注入)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -4767,7 +4673,6 @@ def get_latest_price() -> float | None:
             return float(cached_spot)
     except (TypeError, ValueError):
         pass
-    global _latest_price
     if _latest_price and _latest_price > 0:
         return _latest_price
     try:
@@ -5148,7 +5053,6 @@ def _process_tick_existing_decision_bar(
     )
 
     current_price = float(last_bar["close"])
-    signal_decision_id = ""
     if bridge is not None and hasattr(bridge, "get_spot_quote"):
         price_guard = _tick_guard_current_price_with_spot_quote(
             current_price=current_price,
@@ -5305,7 +5209,6 @@ def _process_tick_factor_pipeline(
         log=log,
     )
     factor_values = committed_decision.factor_values
-    signals = committed_decision.signals
     composite = committed_decision.composite
     gate_result = committed_decision.gate_result
     # 3. 发单 (仅非 dry_run 且门通过)

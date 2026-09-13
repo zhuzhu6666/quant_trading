@@ -17,9 +17,7 @@ def _live_service():
     return _ls_module
 
 
-from backend.core.retry import retry
 from backend.services import live_close_settlement, live_open_processing
-from backend.services.canonical_v2_reader import iter_decision_rows
 from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.services.live_open_admission import (
     evaluate_final_open_admission as _evaluate_final_open_admission,
@@ -41,11 +39,9 @@ from backend.services.live_position_lifecycle import (
 )
 from backend.services.live_reconciliation import (
     evaluate_reconciliation_snapshot as _evaluate_reconciliation_snapshot,
-    explicit_position_reconcile as _explicit_position_reconcile,
     verify_position_protection_projection as _verify_position_protection_projection,
 )
-from backend.services.live_safety_state import append_safety_outbox, no_new_risk_latch_status, no_new_risk_latched
-from backend.services.live_state_store import live_state_get, live_state_update
+from backend.services.live_safety_state import no_new_risk_latch_status
 from backend.services.live_tick_pipeline import (
     build_effective_event_sizing_payload as _tick_build_effective_event_sizing_payload,
     build_factor_bar as _tick_build_factor_bar,
@@ -53,15 +49,9 @@ from backend.services.live_tick_pipeline import (
     build_open_order_preflight as _tick_build_open_order_preflight,
     build_order_failed_ledger_payloads as _tick_build_order_failed_ledger_payloads,
     build_skip_ledger_payload as _tick_build_skip_ledger_payload,
-    collect_position_ids as _tick_collect_position_ids,
     guard_current_price_with_spot_quote as _tick_guard_current_price_with_spot_quote,
-    normalize_live_positions_payload as _tick_normalize_live_positions_payload,
-    resolve_open_protection_prices as _tick_resolve_open_protection_prices,
-    resolve_order_fill_price as _tick_resolve_order_fill_price,
-    resolve_order_position_id as _tick_resolve_order_position_id,
 )
 from risk.policy_service import INCIDENT_MODE_RANK
-from loguru import logger
 from typing import Any
 import time
 from backend.services import live_safety_watchdog

@@ -242,12 +242,10 @@ for loop-owned helpers (reconcile publisher, risk-reduction aux recorder,
 loss-streak book, bridge risk context).
 """
 
-from backend.core.retry import retry
 from backend.services import live_close_settlement
 from backend.services.live_position_lifecycle import (
     build_holding_timeout_result_trace_fields as _lifecycle_build_holding_timeout_result_trace_fields,
     build_holding_timeout_verdict_payload as _lifecycle_build_holding_timeout_verdict_payload,
-    build_position_protection_cycle_result as _lifecycle_build_position_protection_cycle_result,
     build_protection_candidate_risk_context_from_candidate as _lifecycle_build_protection_candidate_risk_context_from_candidate,
     build_protection_execution_plan as _lifecycle_build_protection_execution_plan,
     build_protection_execution_result_payloads as _lifecycle_build_protection_execution_result_payloads,
@@ -255,29 +253,19 @@ from backend.services.live_position_lifecycle import (
     market_open_seconds_between as _lifecycle_market_open_seconds_between,
     update_entry_protection_plan_payload as _lifecycle_update_entry_protection_plan_payload,
 )
-from backend.services.live_position_protection_cycle import (
-    PositionProtectionCycleRuntime,
-    run_position_protection_cycle as _runtime_run_position_protection_cycle,
-)
 from backend.services.live_reconciliation import (
     explicit_position_reconcile as _explicit_position_reconcile,
     verify_position_protection_projection as _verify_position_protection_projection,
 )
-from backend.services.live_safety_planner import protection_candidate_to_safety, safety_candidate
-from backend.services.live_state_store import live_state_get
-from dataclasses import asdict
+from backend.services.live_safety_planner import safety_candidate
 from loguru import logger
 from typing import Any, Mapping
 from typing import Any
-from loguru import logger
 import time
 from backend.services import live_safety_watchdog
 from backend.services import live_supervision_runtime
 from backend.services.live_state_store import (
-    _LIVE_STATE_LOCK,
-    _live_state,
     live_state_get,
-    live_state_update,
 )
 
 

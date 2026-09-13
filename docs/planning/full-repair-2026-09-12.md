@@ -261,6 +261,13 @@ test_live_service_lifecycle(163) / test_factor_governance_orchestrator(96) / tes
 ### 结论与残项
 - L4–L7 目标达成；ledger 原“先建 `live_shared_risk_context.py` 中性化共享缝”的判断作废：`build_close_position_risk_context`/`evaluate_risk_reduction_policy`/`load_recovery_row_*`/`record_risk_reduction_aux_failure` 早已在 `live_risk_reduction.py`，`upsert_recovery_position_state` 在 `live_close_settlement` → `live_recovery_position_store`，facade 只需保留组装 runtime 的薄包装，不需要新模块。
 - 永驻部分（串行 tick 决策引擎、读投影、bridge 访问、进程生命周期、prime/诊断）按登记册口径不再拆。
-- 遗留观察项（不阻塞）：safety timing p95；overlay cvar=3.5 下一次真实 autonomous 写入复核；`live_open_pipeline.py` / `live_position_protection_cycle.py` 仍有历史 unused import（B7/L3 批次遗留，未在本批扩大范围）。
+- 遗留观察项（不阻塞）：safety timing p95；overlay cvar=3.5 下一次真实 autonomous 写入复核。
+
+### unused import 减法批（2026-09-13，done，未提交未重启）
+- 范围：`live_service.py` / `live_open_pipeline.py` / `live_position_protection_cycle.py` 三文件 pyflakes 死 import 清理，净 −127/+8 行（~110 个绑定）。
+- 判定方法：pyflakes flagged ∖ 全仓引用面（AST 精确 import-from + 逐行 `mod.attr`/`_live_service().attr`/`setattr`/patch 字符串四模式）。**facade 缝名不删**：`RiskLimitSnapshot`、`canonical_ready`、`iter_decision_rows`、`_tick_resolve_{open_protection_prices,order_fill_price,order_position_id}` 共 6 个保留（owner 惰性回引 + 测试 `setattr(live_service, ...)` patch 缝，pyflakes 对此必然误报，属预期常驻告警）。
+- 手工项：protection_cycle 245–281 提取遗留重复 import 块收编（含自 import、双 logger、双 asdict、shadow 后的 live_state_get，新 flag 的 `live_state_update` 确证无使用后删除）；live_service 死局部 `signal_decision_id`/`signals`（旧版 dd8b6b55^ 同样报 unused，历史残留非拆分回归）、多余 `global` ×2、`_cross_asset_covar` 字符串注解指向不存在的 `CrossAssetCovariance` 改注释（修复 pyflakes undefined name，真类经 covariance_cls 运行时注入）。
+- 两个假阳性教训（后续批次沿用）：① pyflakes `redefinition of unused` 不计函数内使用，不能据此删任一侧；② `try/except ImportError` 里的导入是可导入性探针（`_make_ctrader_bridge` / `get_ctrader` 的 CTraderBridge），import 即语义，常驻告警保留。
+- 验证：pyflakes 三文件仅剩 7 个有证据的常驻告警；目标测试 178 passed（facade boundaries/tick/generation/session_restore/bar_dedup/protection_cycle/entry_barrier/recovery_gate/safety_watchdog/new_risk_gate/ops_governance + test_model_influence 别名防漏）；smoke 215 passed。改动待下次受控重启生效。
 
 - 每批配方（下一轮沿用）：v3 抽取脚本（token 重写 + 作用域 + 碰撞 abort + 跨模块重定向）→ pyflakes 零新增 → 目标测试 → smoke → 全量门 → commit。
