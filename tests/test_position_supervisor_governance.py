@@ -735,6 +735,28 @@ def test_position_supervisor_advisories_delegate_v16_switch_candidate(tmp_path, 
     assert is_v16_candidate_bridge_evidence(bridge_evidence) is True
     assert bridge_evidence["replay_summary"]["replay_run_id"]
     assert int(bridge_evidence["counterfactual_summary"]["trace_count"]) >= 1
+    assert bridge_evidence["candidate_template"]["template_id"] == target_template_id
+    assert (
+        bridge_evidence["generation_context"]["schema_version"]
+        == "position_supervisor_candidate_generation.v1"
+    )
+
+    # The demo-auto review supersedes the advisory-origin suggestion; the
+    # bridged suggestion must keep the generated template resolvable for the
+    # apply path's valid_templates check.
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "UPDATE policy_suggestion SET status='superseded' "
+            "WHERE action='switch_position_supervisor_template' AND suggestion_id<>?",
+            (suggestion_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    assert target_template_id in {
+        item["template_id"] for item in list_position_supervisor_templates(db_path=db_path)
+    }
 
 
 def test_counterfactual_overprotection_blocks_tighter_generated_template(tmp_path):

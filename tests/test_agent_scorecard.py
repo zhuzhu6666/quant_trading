@@ -438,7 +438,7 @@ def test_candidate_only_quality_still_penalizes_failed_lifecycle():
     assert score < 0.5
 
 
-def test_candidate_only_quality_ignores_posterior_not_selected_rotation():
+def test_candidate_only_quality_ignores_rotation_superseded():
     score = AgentScorecardService._quality_score(
         {
             "proposal_count": 0,
@@ -446,7 +446,7 @@ def test_candidate_only_quality_ignores_posterior_not_selected_rotation():
             "policy_suggestion_count": 0,
             "application_count": 0,
             "status_counts": {"superseded": 20},
-            "_posterior_not_selected_count": 20,
+            "_rotation_superseded_count": 20,
         }
     )
 
@@ -461,7 +461,7 @@ def test_candidate_only_quality_penalizes_only_non_rotation_superseded():
             "policy_suggestion_count": 0,
             "application_count": 0,
             "status_counts": {"superseded": 20},
-            "_posterior_not_selected_count": 20,
+            "_rotation_superseded_count": 20,
         }
     )
     mixed = AgentScorecardService._quality_score(
@@ -471,7 +471,7 @@ def test_candidate_only_quality_penalizes_only_non_rotation_superseded():
             "policy_suggestion_count": 0,
             "application_count": 0,
             "status_counts": {"superseded": 20},
-            "_posterior_not_selected_count": 19,
+            "_rotation_superseded_count": 19,
         }
     )
     failed = AgentScorecardService._quality_score(
@@ -507,7 +507,18 @@ def test_agent_scorecard_keeps_rotation_detail_private_and_source_eligible(tmp_p
             """,
             [
                 (f"v16_rotation_{index}", "v16_brain", "posterior_not_selected", "superseded", now, now)
-                for index in range(20)
+                for index in range(10)
+            ]
+            + [
+                (
+                    f"v16_rollover_{index}",
+                    "v16_brain",
+                    "superseded_by_newer_candidate",
+                    "superseded",
+                    now,
+                    now,
+                )
+                for index in range(10)
             ],
         )
         conn.commit()
@@ -519,7 +530,7 @@ def test_agent_scorecard_keeps_rotation_detail_private_and_source_eligible(tmp_p
 
     assert v16["candidate_count"] == 20
     assert v16["quality_score"] == 0.55
-    assert "_posterior_not_selected_count" not in v16
+    assert "_rotation_superseded_count" not in v16
 
 
 def test_agent_generation_context_includes_scope_relevant_experience(tmp_path):

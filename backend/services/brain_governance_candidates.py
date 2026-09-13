@@ -1297,6 +1297,14 @@ class BrainGovernanceCandidateService:
                     "base_template_id": str(candidate_template.get("base_template_id") or ""),
                     "candidate_patch": candidate_patch,
                 },
+                # The apply path resolves generated templates from active
+                # suggestion evidence, so the bridge must carry the full
+                # snapshot (the ref alone cannot rebuild it) plus the
+                # single-control generation context it validates.
+                "candidate_template": candidate_template,
+                "generation_context": dict(
+                    candidate_template.get("generation_context") or {}
+                ),
                 "replay_summary": replay_summary,
                 "counterfactual_summary": supervisor_summary,
             }
