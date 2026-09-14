@@ -1183,11 +1183,11 @@ def test_entry_protection_amend_requires_fresh_matching_projection(
         order_block={},
     )
     monkeypatch.setattr(
-        live_open_processing, "record_amended_open_success_context",
+        live_open_processing, "record_amended_open_success_context_from_live",
         lambda **kwargs: calls["success"].append(kwargs),
     )
     monkeypatch.setattr(
-        live_open_processing, "record_amend_failure_after_fill",
+        live_open_processing, "record_amend_failure_after_fill_from_live",
         lambda **kwargs: calls["failure"].append(kwargs),
     )
     monkeypatch.setattr(
@@ -2261,7 +2261,7 @@ def test_replay_keeps_close_deal_latch_until_recovery_projection_commits(
 ):
     order: list[str] = []
     monkeypatch.setattr(
-        live_service,
+        live_close_settlement,
         "_lifecycle_build_replayed_close_payloads",
         lambda **_kwargs: {
             "total_pnl": -5.0,

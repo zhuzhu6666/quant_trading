@@ -33,7 +33,7 @@
 
 ### 因子发现闭环缺陷（dsl_auto 积压 1,239；2026-09-13 定位并同批修复）
 
-- 状态：`monitoring`（本批修复五处结构缺陷；积压行数未动，改由修复后的晋升/退役路径消化）
+- 状态：`monitoring`（本批修复五处结构缺陷；2026-09-14 开盘复核：队列已开始流动——21 条 `retire_factor` + 11 条 `promote_factor` committed，dsl 604 RETIRED / 15 QUARANTINED / 1218 SHADOW / 1 `PROMOTION_PREPARED`（修复前 594/5/1239/0），catalog 1896→1939、RegistryAdapter 真实 register/unregister、无 `blocked_by_evidence` 洪泛；退出条件 (c) 未达：promote 证据仍带 `activation_blocker_codes=[promotion_not_prepared]`、`blocker_codes=[application_effect_not_mature_positive, controlled_active_canary_contract_missing, …]`）
 - 事实：历史上 0 个 dsl 因子到过 ACTIVE（`factor_lifecycle_state` origin=dsl：RETIRED 594 / QUARANTINED 5 / SHADOW 1,239），
   `canary_promotion_blocked_unbacked` 115 条——晋升门与退役门同时不可达，队列只进不出。
 - 根因（只读探针 + 代码定位，全部有据）：
@@ -62,7 +62,7 @@
 
 ### 学习建议应用闭环（approved 建议不落地；2026-09-13 定位，三处已修）
 
-- 状态：`monitoring`（replay 准入语义、不可执行建议收口与 `entry_cluster` actuator 已修；首个真实控制已落地，待开盘验证 live 消费）
+- 状态：`monitoring`（replay 准入语义、不可执行建议收口与 `entry_cluster` actuator 已修；2026-09-14 开盘复核：三条降权中 `macd_hist`（`gmut_d979fbe50e54…`）与 `di_spread`（`gmut_ce9ca60577e7…`）已落账 `observing`、`stoch_k` 行以「no actionable live weight」supersede、`learning_workload_gate` 返回 `run_new_facts`；未闭环：`rsi_14` 仍 `approved`（delta 0.11）被 grade C 切片挡在 `blocked_by_replay`，`entry_cluster` live 消费因 `no_new_risk_latch` 冻结开仓无样本）
 - 事实（2026-09-13 只读）：5 条 `approved` 且 `governance_eligible=1` 的建议长期没有 `applied_mutation_id`（最早 2026-08-31 `stoch_k boost_small`），
   且 `learning_workload_gate` 因此把每轮休市维护判为 `run_pending_governance` 而跳过。
 - 根因：
@@ -105,6 +105,15 @@
 
 ## 2. 执行与运行时
 
+### 确认成交后的记录接线断裂（2026-09-14 发现并修复，待重启验收）
+
+- 状态：`monitoring`（修复已入工作区，未重启；`no_new_risk_latch` 仍在冻结新风险，需操作者释放）
+- 事实：2026-09-13 23:35 UTC（本地 07:35）tick 3033 一笔确认成交的 LONG，在 post-fill 记录步骤抛 `TypeError: record_amend_failure_after_fill() got an unexpected keyword argument 'attr_engine'` → 触发 fail-closed 串（落 `no_new_risk_latch`，原因 `confirmed_open_post_fill_processing_failed`），此后 4 小时所有开仓被 `no_new_risk_latched` 拒绝。该仓位 broker SL 已生效（4334.2），07:49 被止损平仓（net −6.45），无未保护风险敞口；缺的是恢复与归因记录（该笔 `attribution_missing`）。
+- 根因：`live_open_pipeline._attach_open_trade_protection` 把 `record_success` / `record_failure` 接到了 `live_open_processing` 的**引擎入口**（`(request, *, runtime)`），而 `live_open_protection` 状态机按扁平 kwargs 调用；l3a（`e164e7f9`）为生产调用方定义的 `*_from_live` 适配器自落地起零调用方，测试缝又被 `lambda **kwargs` 假体覆盖，所以单测看不见。
+- 本批替换/删除：接线改为 `record_amended_open_success_context_from_live` / `record_amend_failure_after_fill_from_live`（2 行）；`tests/test_live_service_lifecycle.py` 两处过期 seam 归位（post-fill 用例 patch 目标改为生产适配器；close 回放用例 patch `live_close_settlement` 而不是 `live_service`，该用例自 l3 批次起恒失败）。
+- 退出：重启加载新码 + 操作者释放 latch 后，下一笔确认成交走通适配器并写出恢复/归因记录，且不再出现 `confirmed_open_post_fill_processing_failed`。
+- 验证：还原旧接线 → `test_entry_protection_amend_requires_fresh_matching_projection` 两分支均以生产同款 `TypeError` 失败；签名探针证明扁平上下文只绑定 `*_from_live`。
+
 ### live tick safety 阶段耗时远超节奏（2026-09-10 登记）
 
 - 状态：`active`（只读观测：tick 名义节奏 5s，`safety timing` 显示单 tick `total` 常在 5~122s，`safety=` 段是主因；内存/readiness 批次与该耗时无关，修完尖峰后耗时无改善）
@@ -113,8 +122,9 @@
 - 证据：`grep -a "safety timing" logs/live_loop.log`——`19:59:33 tick 146 ... safety=119.69s total=121.71s`、`19:48:50 tick 12887 ... safety=43.06s total=45.07s`、修复前 `19:14:12 tick 113 ... safety=71.32s total=72.67s`。
 - 剩余：先只读归因 safety 段内部（broker RPC 等待 / Safety 计算 / 锁等待），不得先动节奏、加线程或降门控。
 - 已排除：`live_safety_state` 的 latch 全量重放（4GB 账本、每次 append 后 23~29s，且在模块锁内）已在 `ff4e0ecc` 用重放游标消除（append 后只折尾部 + 重放移出锁）；写入侧已在 `3593fd19`（逐值上限）+ `09ea95e1`（整条 metadata 64KB 上限）封顶，旧账本已于 2026-09-10 压缩 3.94GB → 3.2KB（归档保留于 `data/safety/archive/`，按 `scripts/compact_safety_latch_ledger.py` 校验折叠一致）。safety 段剩余耗时继续归因 broker RPC / Safety 计算本身。
-- 退出：连续 60 分钟内 `safety timing` 的 p95 `total` < 5s 且无 `account_blockers`；针对性测试绿。
-- 验证：`grep -a "safety timing" logs/live_loop.log | tail -50`。
+- 2026-09-14 开盘复核（唯一可算口径：只记慢轮，比例法：慢轮数 ÷ tick 号极差）：最近 60 分钟 720 tick **0 条慢轮**（0%）；06:00~11:55 慢轮 22/4220 = 0.52%（中位 7.0s、p95 19.0s、max 19.2s），其中 09:57~09:59 有 2 条带 `fresh_account_unavailable`。即「pv95」不可直接算，退出线以「窗口内慢轮占比 ≤5% 且无 `account_blockers`」为准。
+- 退出：连续 60 分钟内慢轮占比 ≤5% 且无 `account_blockers`；针对性测试绿。
+- 验证：`run_artifacts/open_market_verify/slow_tick.py`（按 journal/`logs/backend.log` 的 `tick N` 极差算分母）；`grep -a "safety timing" logs/backend.log | tail -50`。
 
 ## 3. 治理、研究与客户端
 

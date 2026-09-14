@@ -959,8 +959,8 @@ def _attach_open_trade_protection(
             verify_projection=_verify_position_protection_projection,
             publish_projection=_live_service()._publish_fresh_position_reconcile,
             release_pending_latch=_live_service()._release_entry_protection_pending_latch,
-            record_success=live_open_processing.record_amended_open_success_context,
-            record_failure=live_open_processing.record_amend_failure_after_fill,
+            record_success=live_open_processing.record_amended_open_success_context_from_live,
+            record_failure=live_open_processing.record_amend_failure_after_fill_from_live,
             record_aux_failure=live_close_settlement.record_risk_reduction_aux_failure,
         ),
     )
