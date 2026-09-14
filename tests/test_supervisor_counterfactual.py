@@ -309,3 +309,40 @@ def test_counterfactual_includes_supervisor_reduce_with_m1_evidence(monkeypatch,
     assert item["evidence"]["bar_timeframe"] == "M1"
     assert item["evidence"]["trade_timeframe"] == "M5"
     assert calls[0][1] == "M1"
+
+
+def test_counterfactual_evaluates_recovery_labelled_supervisor_close(monkeypatch, tmp_path):
+    """L0-0R books recovery-observed supervisor closes as ``chain_broken``.
+
+    The counterfactual evaluates the executed action, not the trigger proof, so
+    that label must not silently drop the review from the stream.
+    """
+
+    db_path = tmp_path / "state.db"
+    _create_db(db_path, close_reason="chain_broken")
+
+    bars = _complete_m1_bars(overrides={2: {"low": 94.9, "close": 95.2}})
+    monkeypatch.setattr(scf, "_load_future_bars", lambda *args, **kwargs: bars)
+
+    result = scf.evaluate_counterfactuals(db_path=db_path, limit=10, materialize=True)
+
+    assert result["count"] == 1
+    item = result["items"][0]
+    assert item["close_reason"] == "chain_broken"
+    assert item["label"] == "premature_tighten"
+    assert result["diagnostics"]["eligible"] == 1
+
+
+def test_counterfactual_still_skips_unlisted_close_reason(monkeypatch, tmp_path):
+    """The whitelist keeps filtering closes it cannot classify."""
+
+    db_path = tmp_path / "state.db"
+    _create_db(db_path, close_reason="mystery_close")
+
+    bars = _complete_m1_bars()
+    monkeypatch.setattr(scf, "_load_future_bars", lambda *args, **kwargs: bars)
+
+    result = scf.evaluate_counterfactuals(db_path=db_path, limit=10, materialize=True)
+
+    assert result["count"] == 0
+    assert result["candidate_count"] == 0

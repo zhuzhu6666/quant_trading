@@ -469,8 +469,16 @@ def evaluate_counterfactuals(
         for row in _review_rows():
             review = _review_payload(conn, row)
             close_reason = str(review.get("close_reason") or "")
+            # ``chain_broken`` is the L0-0R label for a recovery-observed close
+            # whose trigger could not be proven (the recovery path no longer
+            # emits ``restart_replay``).  A supervisor close booked by the
+            # recovery path carries this label while still holding a real
+            # executed action and a broker-reported fill, which is exactly what
+            # this evaluation needs; the executed-trace gate below (and the
+            # price guard further down) still rejects everything else.
             if close_reason not in {
                 "broker_close",
+                "chain_broken",
                 "restart_replay",
                 "thesis_broken",
                 "supervisor_reduce",
