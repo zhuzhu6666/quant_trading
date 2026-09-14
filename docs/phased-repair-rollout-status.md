@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Last verified: 2026-09-14 (开盘复核：发现 post-fill 记录接线断裂并修复（2 行接线 + 测试 seam），latch 冻结开仓 4h 待操作者释放；治理周期/培育回放/因子闭环/学习建议/慢 tick 取数完成；replay 重取 grade C 为旧切片数据缺口所致；§2、§3 更新)
+> Last verified: 2026-09-14 18:15 (开盘复核后的第二个小批：反事实复盘流自 09-11 断流定位并解堵（白名单纳入 `chain_broken`，`79ba699f`），重启后首个周期产出新复盘并验收；post-fill 接线修复已在 15:30/16:00 两笔真实成交上验收；§2、§3 更新)
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -37,11 +37,27 @@
 - **培育回放（待验②）**：02:17 UTC nursery 周期 96.5s 内 `run_bar_replay_evidence` 状态 `completed`；同参数（7d/80）直接实测 **24.7s** ≤ 30s。
 - **因子发现闭环（待验③）**：开盘后已落地 21 条 `retire_factor` + 11 条 `promote_factor`（committed，config_version 5013→5036）；dsl 分布 604 RETIRED / 15 QUARANTINED / 1218 SHADOW / **1 PROMOTION_PREPARED**（修复前 594/5/1239/0）；catalog 1896→1939，RegistryAdapter 真实 register/unregister；每周期建议流 4 delegated + 3 `blocked_by_batch_guard` + 1 `blocked_by_evidence`，无证据洪泛。退出条件 (c) 未达：promote 动作证据仍带 `activation_blocker_codes=[promotion_not_prepared]`、`blocker_codes=[application_effect_not_mature_positive, controlled_active_canary_contract_missing, …]`（登记册已知自锁）。
 - **学习建议应用（待验④）**：三条降权中 `macd_hist`（`gmut_d979fbe50e54…`）、`di_spread`（`gmut_ce9ca60577e7…`）已落账并 `observing`；`stoch_k` 行以「no actionable live weight」supersede 收口；仅剩 `rsi_14` 一条 `approved`（目标 0.89、delta 0.11 ≥ 回放门 0.10 阈值，当前被 grade C 报告挡在 `blocked_by_replay`）；`learning_workload_gate` 现返回 `run_new_facts`，不再恒 pending。`entry_cluster` live 消费已确认：`learning_same_direction_cooldown` 在本日真实入场路径上触发 2 次（15:35、15:40 同向持仓期间的同向加仓被拒），15:42 平仓后的重开尝试由 `supervisor_reentry_cooldown` 拒 1 次（15:45），16:00 冷却结束后同向重开正常成交。
-- **监督候选链（待验⑤）**：自重启起无新 candidate/suggestion（最近一条 `brain_candidate_psv_28f1c69b85d44d32` 09-13 10:00 UTC 已 superseded），`position_supervisor_template` application/effect 仍为 0，暂无可验收的新证据。
+- **监督候选链（待验⑤）**：自重启起无新 candidate/suggestion（最近一条 `brain_candidate_psv_28f1c69b85d44d32` 09-13 10:00 UTC 已 superseded），`position_supervisor_template` application/effect 仍为 0，暂无可验收的新证据。候选证据政策要求 `requires_clean_mature_counterfactual`，而反事实流自 09-11 起断流（本批已解堵，见 §3.9）；首条新复盘即来自 15:30 的监督员平仓（`protection_too_tight` 0.74、fully matured、绑定已验证），后续候选是否出现按登记册监督闭环退出条件跟踪。
 - **慢 tick（待验⑥）**：最近 60 分钟 720 tick 内 0 条慢轮（0%）；06:00~11:55 慢轮占比 0.52%（22/4220；中位 7.0s、max 19.2s），其中 09:57~09:59 有 2 条带 `fresh_account_unavailable`。日志只记慢轮，比例法（慢轮数 ÷ tick 号极差）是唯一可算口径。
 - **replay 准入重取**：修复后重取 `bar_replay_141377e246654736`（24.7s，code/config 绑定一致）grade **C** → `replay_evidence_grade_not_admissible`。原因是 7 天窗口切片此时落在 09-07 03:53~12:25 UTC，含 2 条无 RiskPolicy 判定的 `skip` 决策（`dec_007923710a504036` / `dec_7db0f4adb0224443`，09-07 11:25 UTC；覆盖率 0.975）与 5 对「双方都拒绝但理由不同」（live `supervisor_reentry_cooldown`/`learning_weak_signal_threshold` vs 重算 `non_positive_requested_volume`）。属旧行数据缺口（非本次改动引入），切片前移越过该段（约 09-14 19:25 本地）后评级自愈，否则需经治理通道补历史证据。影响面：仅 ≥0.10 的权重变更被 `blocked_by_replay`。另注：报告的 `runtime_config_hash` 绑定会随每次 RuntimeConfig 变更（治理周期 register/unregister、权重落账）漂移，重取后 12 分钟内即出现 `runtime_config_hash_mismatch`；准入要求「报告晚于最后一次 config 变更」。
 
 **03:21 提速批复核（保留）**：改动 4 文件 +171/−10（`data/duckdb_store.py` 范围取数按月筛库、`data/external_loader.py` 等价滑窗 `_trailing_rank`、`backend/services/replay_harness.py` 决策加载时间下推、`backend/runtime/factor_governance_orchestrator.py` 周期内一次实验索引 + 批量预热准入证据）+ `tests/test_bars_month_range_filter.py`；回放整条链 520s → 23.1s、单次范围取 K 线 3.6s → 0.044s、候选筛选 43~49s → 0.02s、候选评估 7s/个 → 0.005s/个；批次验证 55 + 71 + 32 passed、`pytest -m smoke` 215 passed。
+
+**本批（2026-09-14 18:06 反事实复盘流解堵，提交 `79ba699f`）**：
+
+```text
+Batch: 反事实复盘流准入（supervisor_counterfactual 的 close_reason 白名单纳入 chain_broken）
+Canonical authority: backend.services.supervisor_counterfactual.evaluate_counterfactuals（唯一生产者，learning worker 每 30 分钟调度 materialize）；产物仍是 canonical_v2 counterfactual_review（advisory_only、governance_eligible=false）
+Deleted paths: 无删除（白名单旧值 restart_replay 保留，供历史事件读取；L0-0R 后不再新产）
+Targeted verification: tests/test_supervisor_counterfactual.py 10 passed（含 2 例新增：chain_broken 产出复盘、未列原因仍被过滤；注入错误过滤后新例以 0 != 1 失败）；监督相关 8 文件 79 passed
+Migration/OpenAPI/build: 无变更
+Runtime verification: learning worker 重启（18:06:20 本地，NRestarts=0）后 10:09 UTC `[evolution_coordinator] finished supervisor_learning in 10.3s`，即为 15:30 监督员平仓（288549050）产出首条新复盘 `live_counterfactual_scf_0375894ff3c82cbe_…`（protection_too_tight 0.74 / fully_matured / maturity.governance_eligible=true / selection_eligible=true / 模板绑定 binding_verified）；事件 198→199，最新 09-11 00:35 → 09-14 15:42
+Remaining compatibility: broker_close 且无执行动作的平仓继续判 not_executed；缺 entry/close 价格的 close 由价格门跳过；只读复算与生产写入共用同一函数（探针一律 materialize=False）
+Unresolved live evidence: selection 首个可治理候选（监督闭环退出条件，登记册 §1）
+Next batch: 旧债登记册 §1「recovery_position_state.attribution_integrity 无运行时写入者」（用户已裁定下一批修）
+```
+
+同内容绑定重取回放报告：`bar_replay_ac33f3d845ee4af2`（23.9s，code_version 随本次 Python 内容更新，grade 仍 C——切片仍落在 09-07 缺口段，见上文「replay 准入重取」）。
 
 ## 3. 未完成 / 待复核证据
 
@@ -58,8 +74,8 @@
 5. **每次发布门重取**：process-loaded flags、PID、fingerprint、release preflight 证据；当前源码绑定的 execution/safety fault matrix attestation；Safety 在 enforce 姿态下的连续性与完整 broker position lifecycle 证据。
 6. **因子发现闭环（2026-09-13 修复批；2026-09-14 开盘已见首批动作）**：五处结构缺陷已修（方向契约投影、轮转饿死、退役人口判据、证据时钟、评估覆盖）。开盘后第一批真实动作已落地：21 条 `retire_factor` + 11 条 `promote_factor`（committed，config_version 5013→5036），dsl 分布 604 RETIRED / 15 QUARANTINED / 1218 SHADOW / 1 `PROMOTION_PREPARED`（修复前 594/5/1239/0），catalog 1896→1939；无 `blocked_by_evidence` 洪泛。退出条件 (c)（首个 `origin=dsl` 因子达 ACTIVE）仍未达：promote 证据带 `activation_blocker_codes=[promotion_not_prepared]` 与 `blocker_codes=[application_effect_not_mature_positive, controlled_active_canary_contract_missing, …]`。详见 [legacy-debt-register.md](legacy-debt-register.md)。
 7. **学习建议应用闭环（2026-09-13 修复批；2026-09-14 开盘部分验收）**：三条降权中 `macd_hist`（`gmut_d979fbe50e54…`）与 `di_spread`（`gmut_ce9ca60577e7…`）已落账并 `observing`；`stoch_k` 行以「no actionable live weight」supersede 收口；`learning_workload_gate` 现返回 `run_new_facts`。未闭环一项：`rsi_14` 仍是唯一 `approved` 行（目标 0.89、delta 0.11），被 grade C 的 replay 切片挡在 `blocked_by_replay`；`entry_cluster` live 消费已确认（2026-09-14 15:35/15:40 `learning_same_direction_cooldown` 拒绝同向加仓、15:45 `supervisor_reentry_cooldown` 拒绝平仓后重开、16:00 冷却结束正常成交）。
-8. **post-fill 记录接线断裂（2026-09-14 发现并修复，待重启验收）**：详见 §2；验收线 = 重启加载新码 + 操作者释放 `no_new_risk_latch` 后，下一笔确认成交的正常走通 `record_*_from_live` 与恢复/归因记录，且不再出现 `confirmed_open_post_fill_processing_failed`。**2026-09-14 17:30 已验收**（15:30 / 16:00 两笔：`ORDER+AMEND OK`、attribution recorded、恢复行 applied、学习样本 `integrity=full`；无硬 latch），条目已从旧债登记册移除。
-9. **反事实复盘流断流（2026-09-14 发现，待裁定）**：`counterfactual_review` 事件停在 2026-09-11 00:35（共 198 条）；准入白名单缺 `chain_broken`（L0-0R 后恢复路径已不再产 `restart_replay`），今日监督员主动平仓的 288549050 因此没有复盘，`position_supervisor_selection.v1` 的 `requires_clean_mature_counterfactual` 随之无法满足（candidate_count 0 / `no_eligible_governed_template`）。详见 [legacy-debt-register.md](legacy-debt-register.md) §3。
+8. **post-fill 记录接线断裂（2026-09-14 发现并修复，已验收）**：详见 §2；验收线 = 重启加载新码 + 操作者释放 `no_new_risk_latch` 后，下一笔确认成交的正常走通 `record_*_from_live` 与恢复/归因记录，且不再出现 `confirmed_open_post_fill_processing_failed`。**2026-09-14 17:30 已验收**（15:30 / 16:00 两笔：`ORDER+AMEND OK`、attribution recorded、恢复行 applied、学习样本 `integrity=full`；无硬 latch），条目已从旧债登记册移除。
+9. **反事实复盘流断流（2026-09-14 发现并同批修复，已验收）**：`counterfactual_review` 曾停在 2026-09-11 00:35（198 条），因准入白名单缺 `chain_broken`（L0-0R 后恢复路径已不再产 `restart_replay`），监督员主动平仓的 288549050 因此没有复盘，`position_supervisor_selection.v1` 的 `requires_clean_mature_counterfactual` 随之无法满足。修复 `79ba699f`（白名单纳入 `chain_broken`，执行动作与成交价两道门不变）后 learning worker 重启（18:06 本地），10:09 UTC 周期即为该笔产出首条新复盘：`protection_too_tight` 0.74、`fully_matured`、`maturity.governance_eligible=true`、`selection_eligible=true`、绑定 `binding_verified`，事件 198→199。剩余观察：selection 首个可治理候选按 [legacy-debt-register.md](legacy-debt-register.md) §1 监督闭环退出条件跟踪。
 
 上述证据不能由单测、历史快照或 readiness 替代；未满足前不推进后续静态开关，也不把 readiness ready、单次 bridge 或单次 effect 解释为自治毕业。
 
