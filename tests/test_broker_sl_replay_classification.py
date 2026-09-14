@@ -1,9 +1,10 @@
-"""Broker protective-fill match and the two-value recovery close contract.
+"""Broker protective-fill match and recovery close attribution.
 
 A recovery-replayed close (position vanished → reconciled from deals) carries
-no close reason by itself.  L0-0R: the only evidence that upgrades it to
-``broker_close`` is a fill matching the durable protective order; everything
-else stays ``chain_broken``.  These tests pin that contract.
+no close reason by itself.  L0-0R: a fill matching the durable protective
+order is ``broker_close``; a complete supervisor-executed chain (applied
+close + fill after the decision inside the window) reuses the supervisor
+reason; everything else stays ``chain_broken``.  These tests pin that contract.
 """
 
 from __future__ import annotations
@@ -163,13 +164,13 @@ def test_fill_far_from_sl_stays_chain_broken(_intent_store):
     # The rejected candidate is still cited for auditability.
     assert cited.get("intent_id") == "int-1"
 
-
 def test_durable_supervisor_reason_is_never_recovery_attribution(_intent_store):
-    """L0-0R-b: recovery cannot upgrade a close from a supervisor record.
+    """L0-0R-b: a bare supervisor record never becomes recovery attribution.
 
-    A durable ``pending_close_reason`` proves what the supervisor once
-    requested, not what executed the position — without a protective-fill
-    match the close stays ``chain_broken``.
+    A durable ``pending_close_reason`` without an applied execution proves
+    what the supervisor once requested, not what executed the position —
+    without a protective-fill match or a complete applied-close chain the
+    close stays ``chain_broken``.
     """
     _set_intent(_intent_store, sl=4597.27, tp=4561.60)
 
@@ -244,3 +245,84 @@ def test_plain_restart_replay_still_contaminates_learning():
     issue = build_system_issue_context(review)
     assert issue["contaminates_learning"] is True
     assert "restart_replay" in issue["labels"]
+
+
+def _supervisor_chain_meta(**overrides):
+    meta = {
+        "last_supervisor_applied_action": "close",
+        "latest_supervisor_source": "position_supervisor",
+        "last_supervisor_reason": "thesis_broken",
+        "last_supervisor_applied_ts": 1789385428.64,
+        "latest_supervisor": {"decision_ts": 1789385420.65, "action": "close"},
+    }
+    meta.update(overrides)
+    return meta
+
+
+def test_complete_supervisor_chain_reuses_supervisor_reason(_intent_store):
+    """599-case: applied close + fill after the decision ⇒ real reason."""
+    _set_intent(_intent_store, sl=4287.67, tp=4309.44)
+
+    close_reason, close_reason_source, cited = _resolve_replayed_close_reason(
+        {
+            "net": -0.45,
+            "exec_price": 4296.07,
+            "exec_timestamp": 1789385425.15,
+            "price_quality": "broker_reported",
+        },
+        {
+            "position_id": "288607599",
+            "direction": 1,
+            "recovery_meta": _supervisor_chain_meta(),
+        },
+    )
+
+    assert close_reason == "thesis_broken"
+    assert close_reason_source == "supervisor_applied_close"
+    assert cited.get("supervisor_applied_close") is True
+
+
+def test_fill_before_supervisor_decision_stays_chain_broken(_intent_store):
+    """A fill that predates the supervisor decision cannot be its execution."""
+    _set_intent(_intent_store, sl=4287.67, tp=4309.44)
+
+    close_reason, close_reason_source, _cited = _resolve_replayed_close_reason(
+        {
+            "net": -0.45,
+            "exec_price": 4296.07,
+            "exec_timestamp": 1789385410.0,
+            "price_quality": "broker_reported",
+        },
+        {
+            "position_id": "288607599",
+            "direction": 1,
+            "recovery_meta": _supervisor_chain_meta(),
+        },
+    )
+
+    assert close_reason == "chain_broken"
+    assert close_reason_source == "restart_replay"
+
+
+def test_non_close_supervisor_action_stays_chain_broken(_intent_store):
+    """An applied tighten is no proof of what closed the position."""
+    _set_intent(_intent_store, sl=4287.67, tp=4309.44)
+
+    close_reason, close_reason_source, _cited = _resolve_replayed_close_reason(
+        {
+            "net": -0.45,
+            "exec_price": 4296.07,
+            "exec_timestamp": 1789385425.15,
+            "price_quality": "broker_reported",
+        },
+        {
+            "position_id": "288607599",
+            "direction": 1,
+            "recovery_meta": _supervisor_chain_meta(
+                last_supervisor_applied_action="tighten"
+            ),
+        },
+    )
+
+    assert close_reason == "chain_broken"
+    assert close_reason_source == "restart_replay"

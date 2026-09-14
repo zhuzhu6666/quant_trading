@@ -244,7 +244,7 @@ def test_trade_reviewer_uses_path_quality_for_good_win(monkeypatch, tmp_path):
         pnl=6.18,
         close_price=4098.58,
         close_ts=10_000.0,
-        contributions={"trend": 1.0, "noise": -2.0},
+        contributions={"trend": 2.0, "noise": -1.0},
         real_pnl={
             "deal_id": 99,
             "net": 6.18,
@@ -257,6 +257,14 @@ def test_trade_reviewer_uses_path_quality_for_good_win(monkeypatch, tmp_path):
 
     assert result["outcome_label"] == "good_win"
     assert "lucky_win" not in result["failure_tags"]
+    # A clean win is not a loss: no loss label may ride along, or memory and
+    # learning consumers read the winning trade as a bad outcome.
+    assert not {
+        "good_loss",
+        "clean_good_loss",
+        "conflict_entry_loss",
+        "bad_loss",
+    }.intersection(result["failure_tags"])
     assert result["review_json"]["entry_quality"] >= 0.62
     assert result["review_json"]["exit_quality"] == pytest.approx(0.887, abs=0.001)
 

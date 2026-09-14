@@ -11,23 +11,93 @@ from backend.services.review_contract import (
 )
 
 
+_SUPERVISOR_APPLIED_CLOSE_WINDOW_SECONDS = 600.0
+
+_RESERVED_RECOVERY_REASONS = frozenset(
+    {"broker_close", "restart_replay", "chain_broken", "broker_position_not_found"}
+)
+
+
+def _supervisor_applied_close_evidence(
+    real_pnl: dict[str, Any] | None,
+    position_state: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Cite a complete supervisor-executed close chain, or return None.
+
+    A durable supervisor record alone proves nothing (a protective order may
+    have fired first, or the decision may never have executed).  The chain is
+    complete only when three durable facts line up for this position: the
+    supervisor applied a close, the broker fill landed after that decision
+    and inside a short execution window, and the fill did not match the
+    protective order (checked by the caller first).  Only then may the
+    recovery path reuse the supervisor vocabulary instead of chain_broken.
+    """
+    state = position_state if isinstance(position_state, Mapping) else {}
+    meta = state.get("recovery_meta")
+    meta = meta if isinstance(meta, Mapping) else {}
+    if str(meta.get("last_supervisor_applied_action") or "") != "close":
+        return None
+    if (
+        str(
+            meta.get("latest_supervisor_source")
+            or meta.get("last_supervisor_applied_source")
+            or ""
+        )
+        != "position_supervisor"
+    ):
+        return None
+    reason = str(
+        meta.get("last_supervisor_reason") or meta.get("pending_close_reason") or ""
+    )
+    if not reason or reason in _RESERVED_RECOVERY_REASONS:
+        return None
+    latest = meta.get("latest_supervisor")
+    latest = latest if isinstance(latest, Mapping) else {}
+    pnl = real_pnl if isinstance(real_pnl, Mapping) else {}
+    try:
+        decision_ts = float(latest.get("decision_ts") or 0.0)
+        fill_ts = float(pnl.get("exec_timestamp") or 0.0)
+        applied_ts = float(meta.get("last_supervisor_applied_ts") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if decision_ts <= 0 or fill_ts <= 0 or applied_ts <= 0:
+        return None
+    if not (
+        decision_ts
+        <= fill_ts
+        <= decision_ts + _SUPERVISOR_APPLIED_CLOSE_WINDOW_SECONDS
+    ):
+        return None
+    return {
+        "supervisor_applied_close": True,
+        "reason": reason,
+        "decision_ts": decision_ts,
+        "fill_ts": fill_ts,
+        "applied_ts": applied_ts,
+        "window_seconds": _SUPERVISOR_APPLIED_CLOSE_WINDOW_SECONDS,
+    }
+
+
 def _resolve_replayed_close_reason(
     real_pnl: dict[str, Any] | None,
     position_state: dict[str, Any],
 ) -> tuple[str, str, dict[str, Any]]:
-    """L0-0R two-value attribution for recovery-replayed closes.
+    """L0-0R attribution for recovery-replayed closes, with one honest upgrade.
 
-    A fill matching the durable protective order is the only evidence that
-    upgrades the close to ``broker_close``; without it the close stays
-    ``chain_broken``.  Recovery never reuses the supervisor vocabulary: a
-    durable supervisor record cannot prove the deal was that decision's
-    execution (a protective order may have fired first).
+    A fill matching the durable protective order is ``broker_close``.  A fill
+    covered by a complete supervisor-executed chain (applied close + fill
+    after the decision inside the execution window) reuses the supervisor
+    reason.  Anything else stays ``chain_broken``: recovery never guesses
+    from a bare supervisor record.
     """
     evidence = broker_stop_hit_evidence(
         real_pnl=real_pnl, position_state=position_state
     )
     if evidence.get("matched"):
         return "broker_close", "external_broker_close", evidence
+    applied = _supervisor_applied_close_evidence(real_pnl, position_state)
+    if applied is not None:
+        return str(applied["reason"]), "supervisor_applied_close", applied
     return "chain_broken", "restart_replay", evidence
 
 
@@ -89,8 +159,9 @@ def replay_recovered_close(
         return False
 
     # Why did this position close?  Reconciliation only knows that it is gone.
-    # L0-0R: recovery attribution is two-valued — a protective-fill match is
-    # broker_close, everything else stays chain_broken.
+    # L0-0R: a protective-fill match is broker_close; a complete
+    # supervisor-executed chain reuses the supervisor reason; everything else
+    # stays chain_broken.
     resolved_close_reason, resolved_close_reason_source, sl_hit_evidence = (
         _resolve_replayed_close_reason(real_pnl, position_state)
     )

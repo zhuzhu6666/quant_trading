@@ -485,9 +485,13 @@ class TradeReviewer:
             failure_tags.append("lucky_win")
         elif outcome_label == "bad_loss":
             failure_tags.append("bad_loss")
-        else:
+        elif outcome_label == "good_loss":
             failure_tags.append("good_loss")
             failure_tags.append("clean_good_loss" if not conflict else "conflict_entry_loss")
+        # ``good_win`` deliberately gets no tag: this list names failures, and
+        # memory/learning consumers treat any tag as evidence of a bad outcome
+        # (v16_brain_snapshot files a tagged row as a negative memory).  Calling
+        # a winning trade a loss is a mislabel, not a nuance.
         if pnl <= 0:
             if weak_entry:
                 failure_tags.append("weak_entry_loss")
