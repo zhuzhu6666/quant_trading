@@ -142,6 +142,15 @@
 - 未触发（2026-09-11 只读）：近 7 天 `posterior_degraded` 相关 canonical 事件 0 条、backend/worker 日志 0 命中，受限权重降级路径尚未被真实样本触发，退出条件待首次触发后评估；此期间不得把 `posterior_degraded` 标记解释为已执行降级治理。
 - 退出：降级应用经过现有 RiskPolicy、V16、Coordinator 和 effect observation 连续真实周期验证后，从本登记册删除。
 
+### 反事实复盘流自 2026-09-11 起断流（监督员动作效果与模板选择失去证据）
+
+- 状态：`monitoring`（2026-09-14 发现；待用户裁定：放开 `chain_broken` 白名单，或固化保守取舍）
+- 事实：`backend.services.supervisor_counterfactual.evaluate_counterfactuals`（learning worker 每 30 分钟随 `supervisor_learning` 跑，单次约 10s，`materialize=True`）产出的 canonical `counterfactual_review` 事件共 **198 条，最近一条停在 2026-09-11 00:35**；2026-09-14 只读复算（`materialize=False`，不写入）全历史仍只产出 **55 条（53 fully matured）**，最新同为 09-11 00:35 → 不是没跑，而是没有新 review 通过准入。标签只有 `correct_stop` / `protection_too_tight` / `noise_stopout`，成熟度按 5/15/30/60/120 分钟推进，产物 `advisory_only`、`governance_eligible=false`。
+- 根因：准入第一道门按 `close_reason` 白名单过滤，名单里是旧值 `restart_replay`，**没有 `chain_broken`**；L0-0R（"恢复关闭去猜测化"）把恢复路径观测到的平仓统一写成 `chain_broken` 且不再新产 `restart_replay` → 这类平仓被静默跳过（连 diagnostics 都不计）。2026-09-14 15:30 监督员主动平仓（288549050，真实成交 4317.74、监督 trace `applied`）即因此没有复盘；16:00 券商止盈平仓走完白名单但无监督动作 → `not_executed`（符合设计）。消费者资格 `review_consumer_eligibility(review, "supervisor_counterfactual")` 对该笔为 **eligible**（`contaminates_learning=false`、close_ts 完整），即唯一堵点是白名单。
+- 影响：`position_supervisor_selection.v1` 的证据政策要求 `requires_clean_mature_counterfactual=true`（`position_supervisor_governance.py` 同值），流断后没有候选能满足 → 现查 `candidate_count=0`、`default_binding.reason=no_eligible_governed_template`；监督治理闭环"等新证据"与此同源。
+- 退出（二选一，用户裁定）：① 把 `chain_broken` 纳入白名单（仅当存在真实执行动作与券商成交价时评"动作好坏"，`_trace_is_real_execution` 继续兜底），补回归测试；或 ② 维持保守（证据不干净不复盘），在文档固化该取舍并删除白名单中的死值 `restart_replay`。
+- 验证：`run_artifacts/open_market_verify/probe_cf.py`（只读复算 + 单 review 诊断）；`select count(*), max(observed_at) from canonical_v2.event where event_type='counterfactual_review'`。
+
 ### parity replay 尚非 live-equivalent
 
 - 状态：`migrating`
