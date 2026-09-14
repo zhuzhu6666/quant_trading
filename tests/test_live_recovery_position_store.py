@@ -297,3 +297,102 @@ def test_recovery_store_keeps_lineage_when_index_is_stale(tmp_path):
         == []
     )
     assert store.load(284485647)["entry_decision_id"] == "dec_87ae51b36fe44742"
+
+
+def _integrity_store(tmp_path, name="integrity.db"):
+    path = tmp_path / name
+    connect = _connection_factory(path)
+    conn = connect()
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+    store = RecoveryPositionStore(
+        RecoveryPositionStoreRuntime(
+            get_read_connection=connect,
+            get_write_connection=connect,
+            execute=lambda conn, sql, params=(): conn.execute(sql, params),
+            normalize_position=normalize_position_snapshot,
+            normalize_row=normalize_recovery_position_row,
+            lookup_entry_decision_id=lambda _position_id: "decision-1",
+            build_meta_update_payload=build_recovery_meta_update_payload,
+            build_closed_update_payload=build_recovery_closed_update_payload,
+            now=lambda: 100.0,
+            local_open_volumes={},
+        )
+    )
+    return path, store
+
+
+def _integrity_column(path, position_id):
+    conn = sqlite3.connect(path)
+    try:
+        row = conn.execute(
+            "SELECT attribution_integrity FROM recovery_position_state WHERE position_id=?",
+            (str(int(position_id)),),
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def test_recovery_store_mark_closed_writes_carried_attribution_integrity(tmp_path):
+    """The close writer mirrors the trade review's verdict into the column."""
+
+    path, store = _integrity_store(tmp_path)
+    store.upsert(
+        {
+            "position_id": 7,
+            "symbol": "XAUUSD+",
+            "direction": -1,
+            "open_price": 4317.0,
+            "volume": 100.0,
+        },
+        broker="ctrader",
+        strategy_name="factor_v4",
+    )
+    assert _integrity_column(path, 7) == "unknown"
+
+    store.mark_closed(
+        7,
+        close_reason="broker_close",
+        close_pnl=-0.45,
+        closed_at=140.0,
+        attribution_integrity="full",
+    )
+    assert _integrity_column(path, 7) == "full"
+
+
+def test_recovery_store_mark_closed_without_verdict_keeps_existing_value(tmp_path):
+    """A close that carries no verdict must not clobber an existing value
+    (e.g. migration 0037 backfills, or the outer retire mark)."""
+
+    path, store = _integrity_store(tmp_path)
+    store.upsert(
+        {
+            "position_id": 9,
+            "symbol": "XAUUSD+",
+            "direction": -1,
+            "open_price": 4317.0,
+            "volume": 100.0,
+        },
+        broker="ctrader",
+        strategy_name="factor_v4",
+    )
+    store.mark_closed(
+        9,
+        close_reason="chain_broken",
+        close_pnl=0.0,
+        closed_at=140.0,
+        attribution_integrity="chain_broken",
+    )
+    assert _integrity_column(path, 9) == "chain_broken"
+
+    store.mark_closed(
+        9,
+        close_reason="broker_close",
+        close_pnl=0.0,
+        closed_at=150.0,
+    )
+    assert _integrity_column(path, 9) == "chain_broken"

@@ -119,6 +119,9 @@ def replay_recovered_close(
         close_pnl=total_pnl,
         closed_at=close_ts,
         meta=payloads["recovery_meta"],
+        attribution_integrity=str(
+            (payloads.get("review") or {}).get("attribution_integrity") or ""
+        ),
     )
     runtime.release_close_latch(int(position_id), real_pnl)
 

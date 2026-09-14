@@ -973,7 +973,8 @@ CREATE TABLE IF NOT EXISTS recovery_position_state (
     recovery_meta_json TEXT DEFAULT '{}',
     closed_at REAL DEFAULT 0.0,
     close_reason TEXT DEFAULT '',
-    close_pnl REAL DEFAULT 0.0
+    close_pnl REAL DEFAULT 0.0,
+    attribution_integrity TEXT DEFAULT 'unknown'
 );
 
 CREATE INDEX IF NOT EXISTS idx_evolution_events_type ON evolution_events(event_type);

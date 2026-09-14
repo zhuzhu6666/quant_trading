@@ -220,6 +220,7 @@ def cleanup_closed_position(
     close_ts: float,
     real_pnl: dict[str, Any] | None,
     factor_contributions: dict[str, Any],
+    attribution_integrity: str | None = None,
     runtime: ClosedPositionProcessingRuntime,
 ) -> bool:
     pid = int(position_id)
@@ -234,6 +235,7 @@ def cleanup_closed_position(
                 "real_pnl": real_pnl or {},
                 "factor_contributions": factor_contributions or {},
             },
+            attribution_integrity=attribution_integrity,
         )
     except Exception as exc:
         projection_ready = False

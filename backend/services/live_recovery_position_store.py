@@ -418,7 +418,12 @@ class RecoveryPositionStore:
         close_pnl: float,
         closed_at: float,
         meta: Mapping[str, Any] | None = None,
+        attribution_integrity: str | None = None,
     ) -> None:
+        # The column mirrors the trade review's verdict for this close; a close
+        # that carries no verdict (legacy callers) must not clobber a value
+        # that is already there (e.g. migration 0037 backfills).
+        integrity = str(attribution_integrity or "").strip().lower() or None
         position_key = str(int(position_id))
         conn = self.runtime.get_write_connection()
         try:
@@ -443,6 +448,7 @@ class RecoveryPositionStore:
                     closed_at=?,
                     close_reason=?,
                     close_pnl=?,
+                    attribution_integrity=COALESCE(?, attribution_integrity),
                     recovery_meta_json=?
                 WHERE position_id=?
                 """,
@@ -450,6 +456,7 @@ class RecoveryPositionStore:
                     payload["closed_at"],
                     payload["close_reason"],
                     payload["close_pnl"],
+                    integrity,
                     json.dumps(
                         payload["recovery_meta"],
                         ensure_ascii=False,

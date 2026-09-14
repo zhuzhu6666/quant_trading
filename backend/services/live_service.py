@@ -4866,6 +4866,7 @@ def _cleanup_closed_position_after_tick(
     close_ts: float,
     real_pnl: dict | None,
     factor_contributions: dict,
+    attribution_integrity: str | None = None,
 ) -> bool:
     return _runtime_cleanup_closed_position(
         position_id=cpid,
@@ -4874,6 +4875,7 @@ def _cleanup_closed_position_after_tick(
         close_ts=close_ts,
         real_pnl=real_pnl,
         factor_contributions=factor_contributions,
+        attribution_integrity=attribution_integrity,
         runtime=_closed_position_processing_runtime(),
     )
 

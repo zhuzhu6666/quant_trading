@@ -50,6 +50,9 @@ def handle_closed_positions_after_tick(
     for position_id in closed_pids:
         pid = int(position_id)
         real_pnl = real_pnls.get(pid)
+        # Bound before the try so the auxiliary-deferred fallback mark below
+        # can always reference it, even when attribution itself raised.
+        attribution_integrity: str | None = None
         try:
             if not runtime.authoritative_close_pnl(real_pnl):
                 # 不要把"库里已存在的 close deal"当作 baseline 写进 latch:
@@ -161,6 +164,7 @@ def handle_closed_positions_after_tick(
                 close_ts=close_ts,
                 real_pnl=real_pnl,
                 factor_contributions=factor_contributions,
+                attribution_integrity=attribution_integrity,
             )
             if projection_ready is not False:
                 recovery_projected_ids.add(pid)
@@ -189,6 +193,7 @@ def handle_closed_positions_after_tick(
                             f"{type(exc).__name__}:{exc}"
                         ),
                     },
+                    attribution_integrity=attribution_integrity,
                 )
                 recovery_projected_ids.add(pid)
             except Exception as recovery_exc:

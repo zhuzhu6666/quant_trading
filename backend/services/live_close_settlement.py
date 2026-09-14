@@ -1547,6 +1547,7 @@ def mark_recovery_position_closed(
     close_pnl: float,
     closed_at: float,
     meta: dict | None = None,
+    attribution_integrity: str | None = None,
 ) -> None:
     recovery_position_store().mark_closed(
         position_id,
@@ -1554,6 +1555,7 @@ def mark_recovery_position_closed(
         close_pnl=close_pnl,
         closed_at=closed_at,
         meta=meta,
+        attribution_integrity=attribution_integrity,
     )
 
 
