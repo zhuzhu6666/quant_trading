@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-09-14 19:00 (遗留债逐条复核：slow tick 达退出线已销账（18 条降至 17 条）；其余逐条现查均未达退出条件——rsi_14 仍 approved、dsl 无 ACTIVE、selection 候选 0、模板切换 0、后验降级 0 触发、trace 全 close 零 tighten、重启后无新平仓、重训未发生、24 小时零重启时钟因 18:06 重置；此前：恢复表完整度列补写入者、反事实流解堵、post-fill 接线修复)
+> Last verified: 2026-09-14 19:50 (回放缺输入分歧改记 input gap 批：报告回到 B 级准入放行，rsi_14 在 11:42 UTC 周期落账，学习建议应用闭环 exit (a)(b) 全齐已销账（17 条降至 16 条）；此前：slow tick 销账、恢复表完整度列补写入者、反事实流解堵、post-fill 接线修复)
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归（active / migrating / monitoring / quarantined / regressed）。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -59,32 +59,6 @@
   证据停滞判据（修复前 16）；轮转选择 500/1,234 且含 SHADOW 135 行（修复前 0）；`evaluate_shadow_factors(expressions=…)`
   实测 oos_bars 249。针对性测试 `tests/test_factor_catalog_governance.py`、`tests/test_factor_governance_acceleration_flow.py`、
   `tests/test_evolution_closure_fixes.py`、`tests/backend/runtime/`（55 passed）+ `pytest -m smoke`（215 passed）。
-
-### 学习建议应用闭环（approved 建议不落地；2026-09-13 定位，三处已修）
-
-- 状态：`monitoring`（replay 准入语义、不可执行建议收口与 `entry_cluster` actuator 已修；2026-09-14 复核：(a) 三条降权中 `macd_hist`（`gmut_d979fbe50e54…`）与 `di_spread`（`gmut_ce9ca60577e7…`）已落账 `observing`、`stoch_k` 行以「no actionable live weight」supersede、`learning_workload_gate` 返回 `run_new_facts`，`rsi_14` 仍 `approved`（delta 0.11）被 grade C 切片挡在 `blocked_by_replay`；(b) 已确认，`learning_same_direction_cooldown` 真实入场路径触发 2 次（15:35、15:40 同向持仓期加仓被拒），15:42 平仓后的重开由 `supervisor_reentry_cooldown` 拒 1 次，冷却结束（16:00）同向重开正常成交）
-- 事实（2026-09-13 只读）：5 条 `approved` 且 `governance_eligible=1` 的建议长期没有 `applied_mutation_id`（最早 2026-08-31 `stoch_k boost_small`），
-  且 `learning_workload_gate` 因此把每轮休市维护判为 `run_pending_governance` 而跳过。
-- 根因：
-  1. **replay 准入门不可达**：`FactorWeightChangeService._replay_admission` 要求 `ReplayHarnessService.status()` ok，而治理 replay 报告连续 6 份全为 C——
-     80 个决策的 47 个 disagreement 全是「live 因 live-only 闸门拒绝（39× `supervisor_reentry_cooldown`、5× `learning_weak_signal_threshold`、
-     3× `loss_cooldown_active`）、离线重算允许」。这是缺失 live 状态（input gap），不是重算分歧；按 disagreement 统计使 grade 恒为 C，
-     于是 rsi_14 / macd_hist / di_spread 三条降权建议每次都被 `blocked_by_replay` 拦在应用账本之前。
-  2. **不可执行建议永不收口**：`_apply_approved_factor_suggestions_for_demo` 对 `old_weight<=0`（如已隔离的 `stoch_k`）只记 `skipped_non_actionable_weight`、
-     不 supersede → 该行永久 `approved` → workload gate 永久 pending。
-  3. **`entry_cluster` 只有消费面没有写入者**（2026-09-13 修复）：stepper 的 step 与 pending 口径都不含该 scope，批准后无人应用；
-     live 侧 `_active_entry_cluster_learning_policy` 只能读到已应用控制，所以该建议永远不生效。
-- canonical：replay readiness = `ReplayHarnessService.status()`（唯一）；建议状态机 = `policy_suggestion.status` + `applied_mutation_id`；
-  应用写入者 = `FactorWeightChangeService`（因子权重）、`EntryQualityGovernanceService`（entry-quality）与 `EntryClusterGovernanceService`（entry-cluster），
-  三者都经过 Coordinator 的 typed domain-only mutation；live 只读 committed 控制。
-- 本批替换/删除：replay 比较语义（live-only 拒绝改记 `live_state_gap_count`，不进 grade；真正分歧仍记 disagreement）；非可执行建议从 `skipped` 改为 supersede 并保留原因；`superseded` 计数覆盖两类收口；`entry_cluster` 由「无 actuator」改为 stepper step `apply_entry_cluster_control` + runner allowlist 项（含 `governance_mutation_coordinator` 对 `same_direction_cooldown` 的收紧分类）。
-- 现查证据：replay 报告 `bar_replay_88ffb032b1044dfb`（补 actuator 后重取，替换首份 `bar_replay_90cfb475bdb242fe`）grade A、`status ok=True fresh blockers=[]`、config/code 绑定一致、`risk_policy_recompute` disagreement 0 / live_state_gap 47、sub-action 0，指标与首份逐项相同；
-  2026-09-13 16:21 UTC 生产应用首条 entry-cluster 控制：`psg_entry_cluster_7a728f32…` → mutation `gmut_5c0b3daa78954bc39be13698d17f8544` `committed` / `risk_class=risk_tightening`，
-  `learning_application_log` 状态 `observing`，live 投影 `active=True min_same_direction_open_count=1`（`governance_authority=committed_mutation`）。
-- 退出：(a) 开盘后首个 stepper 周期内三条因子降权落到 `applied_mutation_id`（或按审批口径 superseded），`stoch_k` 行被 supersede；
-  (b) 已满足（补 actuator 并落地首个真实控制），待开盘确认 `learning_same_direction_cooldown` 在真实重开仓路径上触发。
-- 验证：`tests/test_entry_cluster_governance.py`、`tests/test_replay_release_evidence_contract.py`、`tests/test_autonomous_learning.py`、
-  `tests/test_governance_contract_convergence.py`、`tests/test_factor_weight_change_service.py`、`tests/test_replay_gate_downstream_block.py` + `pytest -m smoke`。
 
 ### 平行 authority、重复门控和无退出兼容层
 
