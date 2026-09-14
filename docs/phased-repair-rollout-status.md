@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Last verified: 2026-09-14 18:45 (恢复表完整度列补写入者批：平仓三条路径透传 review 值、今日 3 行 unknown 按 review 回填（2 full + 1 missing）、全表 0 unknown，后端 18:38 重启生效且健康；回放报告随内容重取；剩余下一次真实平仓验证。此前：反事实复盘流解堵并验收，post-fill 接线修复验收)
+> Last verified: 2026-09-14 19:00 (遗留债逐条复核：slow tick 达退出线、从旧债登记册销账（18→17 条）；其余 17 条逐条现查均未达退出条件；此前：恢复表完整度列补写入者、反事实流解堵、post-fill 接线修复)
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -38,7 +38,7 @@
 - **因子发现闭环（待验③）**：开盘后已落地 21 条 `retire_factor` + 11 条 `promote_factor`（committed，config_version 5013→5036）；dsl 分布 604 RETIRED / 15 QUARANTINED / 1218 SHADOW / **1 PROMOTION_PREPARED**（修复前 594/5/1239/0）；catalog 1896→1939，RegistryAdapter 真实 register/unregister；每周期建议流 4 delegated + 3 `blocked_by_batch_guard` + 1 `blocked_by_evidence`，无证据洪泛。退出条件 (c) 未达：promote 动作证据仍带 `activation_blocker_codes=[promotion_not_prepared]`、`blocker_codes=[application_effect_not_mature_positive, controlled_active_canary_contract_missing, …]`（登记册已知自锁）。
 - **学习建议应用（待验④）**：三条降权中 `macd_hist`（`gmut_d979fbe50e54…`）、`di_spread`（`gmut_ce9ca60577e7…`）已落账并 `observing`；`stoch_k` 行以「no actionable live weight」supersede 收口；仅剩 `rsi_14` 一条 `approved`（目标 0.89、delta 0.11 ≥ 回放门 0.10 阈值，当前被 grade C 报告挡在 `blocked_by_replay`）；`learning_workload_gate` 现返回 `run_new_facts`，不再恒 pending。`entry_cluster` live 消费已确认：`learning_same_direction_cooldown` 在本日真实入场路径上触发 2 次（15:35、15:40 同向持仓期间的同向加仓被拒），15:42 平仓后的重开尝试由 `supervisor_reentry_cooldown` 拒 1 次（15:45），16:00 冷却结束后同向重开正常成交。
 - **监督候选链（待验⑤）**：自重启起无新 candidate/suggestion（最近一条 `brain_candidate_psv_28f1c69b85d44d32` 09-13 10:00 UTC 已 superseded），`position_supervisor_template` application/effect 仍为 0，暂无可验收的新证据。候选证据政策要求 `requires_clean_mature_counterfactual`，而反事实流自 09-11 起断流（本批已解堵，见 §3.9）；首条新复盘即来自 15:30 的监督员平仓（`protection_too_tight` 0.74、fully matured、绑定已验证），后续候选是否出现按登记册监督闭环退出条件跟踪。
-- **慢 tick（待验⑥）**：最近 60 分钟 720 tick 内 0 条慢轮（0%）；06:00~11:55 慢轮占比 0.52%（22/4220；中位 7.0s、max 19.2s），其中 09:57~09:59 有 2 条带 `fresh_account_unavailable`。日志只记慢轮，比例法（慢轮数 ÷ tick 号极差）是唯一可算口径。
+- **慢 tick（待验⑥，已达退出线并销账）**：19:00 复核 17:45~18:45 窗口 0 条慢轮（0.00%）、`account_blockers=[]`；早间窗口 720 tick 0 慢轮、全天 33/6246 = 0.53%，均 ≤5%。该条已从旧债登记册移除（追溯走 Git）；若慢轮重现则按 `regressed` 重新登记。日志只记慢轮，比例法（慢轮数 ÷ tick 号极差）是唯一可算口径。
 - **replay 准入重取**：修复后重取 `bar_replay_141377e246654736`（24.7s，code/config 绑定一致）grade **C** → `replay_evidence_grade_not_admissible`。原因是 7 天窗口切片此时落在 09-07 03:53~12:25 UTC，含 2 条无 RiskPolicy 判定的 `skip` 决策（`dec_007923710a504036` / `dec_7db0f4adb0224443`，09-07 11:25 UTC；覆盖率 0.975）与 5 对「双方都拒绝但理由不同」（live `supervisor_reentry_cooldown`/`learning_weak_signal_threshold` vs 重算 `non_positive_requested_volume`）。属旧行数据缺口（非本次改动引入），切片前移越过该段（约 09-14 19:25 本地）后评级自愈，否则需经治理通道补历史证据。影响面：仅 ≥0.10 的权重变更被 `blocked_by_replay`。另注：报告的 `runtime_config_hash` 绑定会随每次 RuntimeConfig 变更（治理周期 register/unregister、权重落账）漂移，重取后 12 分钟内即出现 `runtime_config_hash_mismatch`；准入要求「报告晚于最后一次 config 变更」。
 
 **03:21 提速批复核（保留）**：改动 4 文件 +171/−10（`data/duckdb_store.py` 范围取数按月筛库、`data/external_loader.py` 等价滑窗 `_trailing_rank`、`backend/services/replay_harness.py` 决策加载时间下推、`backend/runtime/factor_governance_orchestrator.py` 周期内一次实验索引 + 批量预热准入证据）+ `tests/test_bars_month_range_filter.py`；回放整条链 520s → 23.1s、单次范围取 K 线 3.6s → 0.044s、候选筛选 43~49s → 0.02s、候选评估 7s/个 → 0.005s/个；批次验证 55 + 71 + 32 passed、`pytest -m smoke` 215 passed。

@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-09-14 18:45 (恢复表完整度列补写入者批：平仓三条路径透传 review 值、今日 3 行 unknown 按 review 回填（2 full + 1 missing）、全表 0 unknown，后端 18:38 重启生效且健康；回放报告随内容重取；剩余下一次真实平仓验证。此前：反事实复盘流解堵并验收，post-fill 接线修复验收)
+> Last verified: 2026-09-14 19:00 (遗留债逐条复核：slow tick 达退出线已销账（18 条降至 17 条）；其余逐条现查均未达退出条件——rsi_14 仍 approved、dsl 无 ACTIVE、selection 候选 0、模板切换 0、后验降级 0 触发、trace 全 close 零 tighten、重启后无新平仓、重训未发生、24 小时零重启时钟因 18:06 重置；此前：恢复表完整度列补写入者、反事实流解堵、post-fill 接线修复)
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归（active / migrating / monitoring / quarantined / regressed）。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -112,18 +112,6 @@
 - 修复：`mark_closed` 新增可选 `attribution_integrity`（`COALESCE(?, 列)`：带值则写、不带则保留，任何旧调用方都改不了已有值）；`mark_recovery_position_closed` 单点透传；live 主路径（`live_closed_position_cycle` 主调 + 异常兜底，经 `cleanup_closed_position`）与恢复路径（`live_recovery_close`，取 `payloads["review"]` 现成值）传入；`retire_broker_missing_position` 的外层 mark 无值可传、保持原样（内层 replay 已写）。开仓路径不动（无平仓尚无值，`unknown` 语义正确）。sqlite 建表语句同步加列（与 PG 0037 对齐）。
 - 影响：当前为零。学习资格读的是 review payload（`review_learning_eligible`，本日两笔新单产出 `integrity=full`/`train_weight=1.0` 样本），且该列暂无读取方（2026-09-14 现查）。风险在该列一旦被接入任何门控，会把所有新行判为不可学——本批已堵住新增来源。
 - 验证：`tests/test_live_recovery_position_store.py` 新增 2 例（带值写入、不带值保留；去掉写入后两例均失败）；平仓相关 6 文件 195 passed + `test_live_service_lifecycle.py` 83 passed；回填脚本 `run_artifacts/open_market_verify/backfill_attribution.py`（带守卫：只动 `unknown` 行）；后端 18:38 重启后 `ok=true/blockers=[]/ready_for_live_execution=true`、live loop 无阻断。
-
-### live tick safety 阶段耗时远超节奏（2026-09-10 登记）
-
-- 状态：`active`（只读观测：tick 名义节奏 5s，`safety timing` 显示单 tick `total` 常在 5~122s，`safety=` 段是主因；内存/readiness 批次与该耗时无关，修完尖峰后耗时无改善）
-- 事实与 owner：三个分段在 `backend/services/live_loop_tick_runtime.py` 串行测量并打印（`positions`=reconcile_positions、`account`=reconcile_alpha_account、`safety`=`runtime.run_safety_cycle`）；owner 仍是 live loop 串行 tick，不新增 authority、不为提速并行化 tick。
-- 影响：循环长期追赶（5s 节奏被打成 1 tick/10~120s），决策与保护延迟随之放大，backend 常驻 CPU 被占；属执行链问题，不是内存问题。
-- 证据：`grep -a "safety timing" logs/live_loop.log`——`19:59:33 tick 146 ... safety=119.69s total=121.71s`、`19:48:50 tick 12887 ... safety=43.06s total=45.07s`、修复前 `19:14:12 tick 113 ... safety=71.32s total=72.67s`。
-- 剩余：先只读归因 safety 段内部（broker RPC 等待 / Safety 计算 / 锁等待），不得先动节奏、加线程或降门控。
-- 已排除：`live_safety_state` 的 latch 全量重放（4GB 账本、每次 append 后 23~29s，且在模块锁内）已在 `ff4e0ecc` 用重放游标消除（append 后只折尾部 + 重放移出锁）；写入侧已在 `3593fd19`（逐值上限）+ `09ea95e1`（整条 metadata 64KB 上限）封顶，旧账本已于 2026-09-10 压缩 3.94GB → 3.2KB（归档保留于 `data/safety/archive/`，按 `scripts/compact_safety_latch_ledger.py` 校验折叠一致）。safety 段剩余耗时继续归因 broker RPC / Safety 计算本身。
-- 2026-09-14 开盘复核（唯一可算口径：只记慢轮，比例法：慢轮数 ÷ tick 号极差）：最近 60 分钟 720 tick **0 条慢轮**（0%）；06:00~11:55 慢轮 22/4220 = 0.52%（中位 7.0s、p95 19.0s、max 19.2s），其中 09:57~09:59 有 2 条带 `fresh_account_unavailable`。即「pv95」不可直接算，退出线以「窗口内慢轮占比 ≤5% 且无 `account_blockers`」为准。
-- 退出：连续 60 分钟内慢轮占比 ≤5% 且无 `account_blockers`；针对性测试绿。
-- 验证：`run_artifacts/open_market_verify/slow_tick.py`（按 journal/`logs/backend.log` 的 `tick N` 极差算分母）；`grep -a "safety timing" logs/backend.log | tail -50`。
 
 ## 3. 治理、研究与客户端
 
