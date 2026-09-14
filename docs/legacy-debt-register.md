@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-09-13 (深夜第三批：`entry_cluster` 补 actuator——此前该 surface 只有 live 消费面没有写入者，批准的同向冷却建议永不生效；新增 stepper step `apply_entry_cluster_control`、runner allowlist 项与 Coordinator 的 `same_direction_cooldown` 收紧分类，生产落地首条控制 `psg_entry_cluster_7a728f32…` → `gmut_5c0b3daa78954bc39be13698d17f8544`（`committed`/`risk_tightening`），live 投影 `active=True min_same_direction_open_count=1`；服务受控重启加载新码并重取 replay 准入。深夜第二批：学习建议应用闭环两处修复——治理 replay 报告分级不再把 live-only 闸门拒绝（reentry cooldown/连亏冷却/学习阈值）计为 disagreement（此前 80 决策中 47 条，使报告恒为 C、全部权重变更 `blocked_by_replay`），新报告 grade A 且 admission fresh；不可执行 approved 建议（`old_weight<=0`）改为 supersede 收口。同日闭环修复批：`dsl_auto` 积压条目重写为“因子发现闭环缺陷”——方向契约投影、轮转饿死、退役人口判据、证据时钟五处结构缺陷同批修复并留探针证据；同批删除 catalog config-only direction、轮转阶段优先级、快车道 `fresh_evidence_bars`/`updated_at` 判据与 `source=='discovered'` 人口判据。同日早前：清理批删除 5 条退出条件已满足的旧账（V16 认知层退役/schema 37-37 ok、CVaR overlay 3.5、emergency close 旧入口零调用方、live_service L 系列收口、因子治理重复重算落地），21→15 条；dsl_auto 积压复核 1,239 并修正退出预算口径；supervisor 治理链首跳缺口已补入专员产线（`0d77157d`/`6ed0d878`），首条 application 待开盘验收；CVaR 原始丢失根因未定，留观无动作)
+> Last verified: 2026-09-14 (开机后校验批：修复 post-fill 记录接线断裂并验收通过（两笔真实成交 `ORDER+AMEND OK` / attribution recorded / 学习样本 `integrity=full`），事故单 4 小时 latch 已按 cause 释放；因子发现闭环首次流动（21 retire + 11 promote、首个 `PROMOTION_PREPARED`），退出条件 (c) 未达；学习建议应用闭环 (b) 确认（`learning_same_direction_cooldown` 真实触发 2 次）；新增 `recovery_position_state.attribution_integrity` 无写入者条目（用户裁定下一批修）；2026-09-13 深夜第三批：`entry_cluster` 补 actuator——此前该 surface 只有 live 消费面没有写入者，批准的同向冷却建议永不生效；新增 stepper step `apply_entry_cluster_control`、runner allowlist 项与 Coordinator 的 `same_direction_cooldown` 收紧分类，生产落地首条控制 `psg_entry_cluster_7a728f32…` → `gmut_5c0b3daa78954bc39be13698d17f8544`（`committed`/`risk_tightening`），live 投影 `active=True min_same_direction_open_count=1`；服务受控重启加载新码并重取 replay 准入。深夜第二批：学习建议应用闭环两处修复——治理 replay 报告分级不再把 live-only 闸门拒绝（reentry cooldown/连亏冷却/学习阈值）计为 disagreement（此前 80 决策中 47 条，使报告恒为 C、全部权重变更 `blocked_by_replay`），新报告 grade A 且 admission fresh；不可执行 approved 建议（`old_weight<=0`）改为 supersede 收口。同日闭环修复批：`dsl_auto` 积压条目重写为“因子发现闭环缺陷”——方向契约投影、轮转饿死、退役人口判据、证据时钟五处结构缺陷同批修复并留探针证据；同批删除 catalog config-only direction、轮转阶段优先级、快车道 `fresh_evidence_bars`/`updated_at` 判据与 `source=='discovered'` 人口判据。同日早前：清理批删除 5 条退出条件已满足的旧账（V16 认知层退役/schema 37-37 ok、CVaR overlay 3.5、emergency close 旧入口零调用方、live_service L 系列收口、因子治理重复重算落地），21→15 条；dsl_auto 积压复核 1,239 并修正退出预算口径；supervisor 治理链首跳缺口已补入专员产线（`0d77157d`/`6ed0d878`），首条 application 待开盘验收；CVaR 原始丢失根因未定，留观无动作)
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归（active / migrating / monitoring / quarantined / regressed）。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -62,7 +62,7 @@
 
 ### 学习建议应用闭环（approved 建议不落地；2026-09-13 定位，三处已修）
 
-- 状态：`monitoring`（replay 准入语义、不可执行建议收口与 `entry_cluster` actuator 已修；2026-09-14 开盘复核：三条降权中 `macd_hist`（`gmut_d979fbe50e54…`）与 `di_spread`（`gmut_ce9ca60577e7…`）已落账 `observing`、`stoch_k` 行以「no actionable live weight」supersede、`learning_workload_gate` 返回 `run_new_facts`；未闭环：`rsi_14` 仍 `approved`（delta 0.11）被 grade C 切片挡在 `blocked_by_replay`，`entry_cluster` live 消费因 `no_new_risk_latch` 冻结开仓无样本）
+- 状态：`monitoring`（replay 准入语义、不可执行建议收口与 `entry_cluster` actuator 已修；2026-09-14 复核：(a) 三条降权中 `macd_hist`（`gmut_d979fbe50e54…`）与 `di_spread`（`gmut_ce9ca60577e7…`）已落账 `observing`、`stoch_k` 行以「no actionable live weight」supersede、`learning_workload_gate` 返回 `run_new_facts`，`rsi_14` 仍 `approved`（delta 0.11）被 grade C 切片挡在 `blocked_by_replay`；(b) 已确认，`learning_same_direction_cooldown` 真实入场路径触发 2 次（15:35、15:40 同向持仓期加仓被拒），15:42 平仓后的重开由 `supervisor_reentry_cooldown` 拒 1 次，冷却结束（16:00）同向重开正常成交）
 - 事实（2026-09-13 只读）：5 条 `approved` 且 `governance_eligible=1` 的建议长期没有 `applied_mutation_id`（最早 2026-08-31 `stoch_k boost_small`），
   且 `learning_workload_gate` 因此把每轮休市维护判为 `run_pending_governance` 而跳过。
 - 根因：
@@ -105,14 +105,13 @@
 
 ## 2. 执行与运行时
 
-### 确认成交后的记录接线断裂（2026-09-14 发现并修复，待重启验收）
+### recovery_position_state.attribution_integrity 无运行时写入者（2026-09-14 发现，用户裁定下一批修）
 
-- 状态：`monitoring`（修复已提交 `5833a827`；2026-09-14 12:06:31 受控重启加载、12:08 操作者按 cause 释放 latch（`safety_freshness/entry_protection_initialization`），`ready_for_live_execution=true`、`live.loop.blockers=[]`；尾证据 = 下一笔确认成交走通 `record_*_from_live` 并写出恢复/归因记录）
-- 事实：2026-09-13 23:35 UTC（本地 07:35）tick 3033 一笔确认成交的 LONG，在 post-fill 记录步骤抛 `TypeError: record_amend_failure_after_fill() got an unexpected keyword argument 'attr_engine'` → 触发 fail-closed 串（落 `no_new_risk_latch`，原因 `confirmed_open_post_fill_processing_failed`），此后 4 小时所有开仓被 `no_new_risk_latched` 拒绝。该仓位 broker SL 已生效（4334.2），07:49 被止损平仓（net −6.45），无未保护风险敞口；缺的是恢复与归因记录（该笔 `attribution_missing`）。
-- 根因：`live_open_pipeline._attach_open_trade_protection` 把 `record_success` / `record_failure` 接到了 `live_open_processing` 的**引擎入口**（`(request, *, runtime)`），而 `live_open_protection` 状态机按扁平 kwargs 调用；l3a（`e164e7f9`）为生产调用方定义的 `*_from_live` 适配器自落地起零调用方，测试缝又被 `lambda **kwargs` 假体覆盖，所以单测看不见。
-- 本批替换/删除：接线改为 `record_amended_open_success_context_from_live` / `record_amend_failure_after_fill_from_live`（2 行）；`tests/test_live_service_lifecycle.py` 两处过期 seam 归位（post-fill 用例 patch 目标改为生产适配器；close 回放用例 patch `live_close_settlement` 而不是 `live_service`，该用例自 l3 批次起恒失败）。
-- 退出：重启加载新码 + 操作者释放 latch 后，下一笔确认成交走通适配器并写出恢复/归因记录，且不再出现 `confirmed_open_post_fill_processing_failed`。
-- 验证：还原旧接线 → `test_entry_protection_amend_requires_fresh_matching_projection` 两分支均以生产同款 `TypeError` 失败；签名探针证明扁平上下文只绑定 `*_from_live`。
+- 状态：`monitoring`（下一批：平仓/回放路径把 review 的 integrity 写进该列）
+- 事实：0037 迁移为 `runtime.recovery_position_state` 增加 `attribution_integrity TEXT NOT NULL DEFAULT 'unknown'` 并只回填历史行（146 `restart_affected` / 88 `chain_broken`）；`live_recovery_position_store` 的 INSERT 列清单不含该列，运行期无写入者 → 2026-09-13 之后新建的行全部停在默认 `unknown`（按 0037 自身契约，`unknown` = 未分类、会被 `learning_eligible` 拒绝）。
+- 影响：当前为零。学习资格读的是 review payload（`review_learning_eligible`，本日两笔新单产出 `integrity=full`/`train_weight=1.0` 样本），且全仓未发现该列的读取方（2026-09-14 现查）。风险在该列一旦被接入任何门控，会把所有新行判为不可学。
+- 退出：平仓/回放路径写入与 review 一致的取值（`full` / `missing` / `chain_broken` / `restart_affected`），或删除该列并同步迁移与契约。
+- 验证：新建恢复行后该列等于其 review 的 `attribution_integrity`；`select attribution_integrity, count(*) from runtime.recovery_position_state group by 1` 不再新增无来源的 `unknown`。
 
 ### live tick safety 阶段耗时远超节奏（2026-09-10 登记）
 
