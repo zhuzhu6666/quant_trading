@@ -29,6 +29,7 @@
 - **修复**（2 行 + 测试 seam）：接线改为 `record_amended_open_success_context_from_live` / `record_amend_failure_after_fill_from_live`；同批修掉 `tests/test_live_service_lifecycle.py` 两处过期 seam（post-fill 用例 patch 引擎名，使不匹配被 fake 吃掉；close 回放用例 patch `live_service` 而符号已在 `live_close_settlement`，该用例自 l3 批次起恒失败）。
 - **验证**：把接线改回旧名字，`test_entry_protection_amend_requires_fresh_matching_projection` 两个参数化分支都以生产同款 `TypeError` 失败；新名字下 83 passed。签名探针证明保护状态机产出的扁平上下文只绑定 `*_from_live`（引擎入口必然 `missing a required argument: 'request'`）。
 - **待生效**：修复需重启加载；`no_new_risk_latch` 按设计只能由操作者释放（无自动释放路径），当前 `ready_for_live_execution=false` 的唯一 blocker 即它。
+- **12:06 受控重启 + 12:08 解闸（用户授权）**：三服务 restart（`ActiveEnterTimestamp=2026-09-14 12:06:31`），启动即 `overlay restored hash=a3aa766d…`、live loop 接回（`recovery bootstrap confirmed broker has no open positions`）、`committed governance projection recovery attempted=100 current=100 degraded=0`；运行进程 `release_identity.head=0d716356`、`clean=true`（即加载的是含修复的工作区）。操作者按 cause 释放 `safety_freshness/entry_protection_initialization`（新增一条 `release_cause` 记录，证据含 position 288378714 已平仓、broker SL 4334.2、reconcile fresh、open_positions 0、fix commit `5833a827`）；随后 `backend_readiness_snapshot.v1` `ok=true/blockers=[]/ready_for_live_execution=true`、`live.loop.blockers=[]`、`phase=running`、`accepting_new_risk=true`。**待取尾证据**：下一笔确认成交走通 `record_*_from_live` 并写出恢复/归因记录。
 
 **开盘待验项取数（2026-09-14）**：
 

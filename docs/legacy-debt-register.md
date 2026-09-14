@@ -107,7 +107,7 @@
 
 ### 确认成交后的记录接线断裂（2026-09-14 发现并修复，待重启验收）
 
-- 状态：`monitoring`（修复已入工作区，未重启；`no_new_risk_latch` 仍在冻结新风险，需操作者释放）
+- 状态：`monitoring`（修复已提交 `5833a827`；2026-09-14 12:06:31 受控重启加载、12:08 操作者按 cause 释放 latch（`safety_freshness/entry_protection_initialization`），`ready_for_live_execution=true`、`live.loop.blockers=[]`；尾证据 = 下一笔确认成交走通 `record_*_from_live` 并写出恢复/归因记录）
 - 事实：2026-09-13 23:35 UTC（本地 07:35）tick 3033 一笔确认成交的 LONG，在 post-fill 记录步骤抛 `TypeError: record_amend_failure_after_fill() got an unexpected keyword argument 'attr_engine'` → 触发 fail-closed 串（落 `no_new_risk_latch`，原因 `confirmed_open_post_fill_processing_failed`），此后 4 小时所有开仓被 `no_new_risk_latched` 拒绝。该仓位 broker SL 已生效（4334.2），07:49 被止损平仓（net −6.45），无未保护风险敞口；缺的是恢复与归因记录（该笔 `attribution_missing`）。
 - 根因：`live_open_pipeline._attach_open_trade_protection` 把 `record_success` / `record_failure` 接到了 `live_open_processing` 的**引擎入口**（`(request, *, runtime)`），而 `live_open_protection` 状态机按扁平 kwargs 调用；l3a（`e164e7f9`）为生产调用方定义的 `*_from_live` 适配器自落地起零调用方，测试缝又被 `lambda **kwargs` 假体覆盖，所以单测看不见。
 - 本批替换/删除：接线改为 `record_amended_open_success_context_from_live` / `record_amend_failure_after_fill_from_live`（2 行）；`tests/test_live_service_lifecycle.py` 两处过期 seam 归位（post-fill 用例 patch 目标改为生产适配器；close 回放用例 patch `live_close_settlement` 而不是 `live_service`，该用例自 l3 批次起恒失败）。
