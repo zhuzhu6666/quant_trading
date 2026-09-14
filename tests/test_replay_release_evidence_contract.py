@@ -424,3 +424,149 @@ def test_live_state_only_denial_is_not_a_replay_disagreement():
         80,
     )
     assert grade == "A"
+
+
+def test_unreconstructible_volume_denial_is_not_a_replay_disagreement():
+    """Both sides deny but the recompute never reached a gate.
+
+    SKIP / gate-denied rows persist no requested volume, so the rebuilt
+    context carries 0.0 and RiskPolicyService short-circuits on
+    non_positive_requested_volume before any gate; the gate states behind
+    the live denial are passed empty as well. The outcome agrees, so this
+    is an input gap, not evidence of divergence. Counting it as a
+    disagreement forces grade C on any slice containing one such row,
+    which blocks every >=0.10 weight change.
+    """
+    from backend.services.replay_harness import (
+        _is_unreconstructible_volume_denial,
+        _verdict_signature,
+    )
+
+    assert _is_unreconstructible_volume_denial(
+        _verdict_signature({"allowed": False, "reason": "supervisor_reentry_cooldown"}),
+        _verdict_signature({"allowed": False, "reason": "non_positive_requested_volume"}),
+    ) is True
+    assert _is_unreconstructible_volume_denial(
+        _verdict_signature({"allowed": False, "reason": "learning_weak_signal_threshold"}),
+        _verdict_signature({"allowed": False, "reason": "non_positive_requested_volume"}),
+    ) is True
+
+    # Genuine divergences still count: an allow/deny flip in either direction.
+    assert _is_unreconstructible_volume_denial(
+        _verdict_signature({"allowed": True, "reason": "ok"}),
+        _verdict_signature({"allowed": False, "reason": "non_positive_requested_volume"}),
+    ) is False
+    # ... and two real gate denials that simply differ.
+    assert _is_unreconstructible_volume_denial(
+        _verdict_signature({"allowed": False, "reason": "supervisor_reentry_cooldown"}),
+        _verdict_signature({"allowed": False, "reason": "max_exposure"}),
+    ) is False
+
+    # The current slice shape (no true disagreements, B-level coverage)
+    # grades B once the misclassification is fixed.
+    grade = ReplayHarnessService._p1_replay_grade(
+        "B",
+        {"bar_window_coverage": 1.0, "stale_bar_alignment_count": 0},
+        {"factor_frame_coverage": 1.0},
+        {"disagreement_count": 0, "error_count": 0},
+        {"disagreement_count": 0, "error_count": 0},
+        80,
+    )
+    assert grade == "B"
+
+
+def test_risk_recompute_routes_volume_shortcircuit_to_input_gap(monkeypatch):
+    """Wire-level guard for the volume-gap branch (not just the classifier).
+
+    A SKIP row whose live verdict is a genuine gate denial but which
+    persisted no requested volume must land in input_gap_count, never in
+    disagreement_count; a genuine allow/deny flip must still disagree.
+    """
+    from backend.services.replay_harness import ReplayHarnessService
+    import risk.policy_service as risk_policy_service
+
+    class _Verdict:
+        def __init__(self, allowed, reason):
+            self._d = {"allowed": allowed, "reason": reason}
+
+        def to_dict(self):
+            return dict(self._d)
+
+    class _Policy:
+        def __init__(self, verdict):
+            self._verdict = verdict
+
+        def evaluate(self, _action, _context):
+            return self._verdict
+
+    risk_inputs = {
+        "schema_version": "open_trade_risk_replay_inputs.v1",
+        "max_position_count": 3,
+        "max_position_api_volume": 300.0,
+        "pyramid_enabled": False,
+        "loss_cooldown_after_losses": 2,
+        "loss_cooldown_bars": 12,
+        "block_on_disk_critical": True,
+        "runtime_incident_mode": "",
+        "autonomy_mode": "",
+        "live_autonomy_unlocked": False,
+        "live_autonomy_unlock_id": "",
+        "risk_limits": {
+            "schema_version": "risk_limit_snapshot.v1",
+            "source": "test",
+            "max_drawdown_pct": 5.0,
+            "max_consecutive_losses": 3,
+            "max_daily_loss_pct": 3.0,
+            "max_daily_trades": 10,
+            "data_lag_max_seconds": 30,
+            "loss_cooldown_after_losses": 2,
+            "loss_cooldown_bars": 12,
+            "block_on_disk_critical": True,
+            "var_threshold_pct": 2.0,
+            "cvar_threshold_pct": 3.0,
+            "circuit_breaker_bypass": False,
+        },
+        "var": {"enabled": False, "threshold_pct": 0.0, "cvar_threshold_pct": 0.0},
+    }
+
+    def _row(decision_id, live_reason, replay_verdict):
+        row = {
+            "decision_id": decision_id,
+            "action_json": json.dumps(
+                {
+                    "score": 0.5,
+                    "risk_verdict": {
+                        "allowed": False,
+                        "reason": live_reason,
+                        "audit_payload": {"temporal_context": {"timeframe_seconds": 300}},
+                    },
+                    "execution_context": {"requested_volume": 0.0},
+                    "risk_replay_inputs": risk_inputs,
+                }
+            ),
+            "risk_state_json": json.dumps({}),
+            "portfolio_state_json": json.dumps({"balance": 10000.0, "equity": 10000.0}),
+        }
+        monkeypatch.setattr(
+            risk_policy_service.RiskPolicyService,
+            "shared",
+            classmethod(lambda _cls: _Policy(replay_verdict)),
+        )
+        return ReplayHarnessService()._evaluate_risk_policy_recompute([row])["metrics"]
+
+    gap = _row(
+        "dec_gap",
+        "supervisor_reentry_cooldown",
+        _Verdict(False, "non_positive_requested_volume"),
+    )
+    assert gap["attempted_count"] == 1
+    assert gap["disagreement_count"] == 0
+    assert gap["input_gap_count"] == 1
+
+    flip = _row(
+        "dec_flip",
+        "max_exposure",
+        _Verdict(True, "ok"),
+    )
+    assert flip["disagreement_count"] == 1
+    assert flip["input_gap_count"] == 0

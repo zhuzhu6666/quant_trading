@@ -216,6 +216,28 @@ def _is_live_state_only_denial(live_sig: tuple[Any, str], replay_sig: tuple[Any,
     )
 
 
+# Both sides deny, but the recompute never reached any gate: it short-circuited
+# on a non-positive requested volume that the stored row never persisted
+# (SKIP / gate-denied rows carry none), while the live verdict is a genuine
+# gate denial with an audit payload. The outcome agrees; the gate behind the
+# live denial is untestable by construction (its state is passed empty too:
+# entry_quality_gate / supervisor_reentry_block). Same principle as
+# _is_live_state_only_denial above: missing reconstructible input is an input
+# gap, not evidence that the current code diverges from the historical code.
+# Counting it as a disagreement fails the whole report (any single risk
+# disagreement forces grade C), which then blocks every >=0.10 weight change.
+REPLAY_VOLUME_SHORT_CIRCUIT_REASON = "non_positive_requested_volume"
+
+
+def _is_unreconstructible_volume_denial(live_sig: tuple[Any, str], replay_sig: tuple[Any, str]) -> bool:
+    """True when both sides deny but the recompute denied only on volume."""
+    return bool(
+        not live_sig[0]
+        and not replay_sig[0]
+        and str(replay_sig[1] or "") == REPLAY_VOLUME_SHORT_CIRCUIT_REASON
+    )
+
+
 def _timeframe_seconds(timeframe: str) -> int:
     tf = str(timeframe or "M5").strip().upper()
     if not tf:
@@ -2344,6 +2366,11 @@ class ReplayHarnessService:
                 replay_sig = _verdict_signature(replay_verdict)
                 agreed = live_sig == replay_sig
                 live_state_only = (not agreed) and _is_live_state_only_denial(live_sig, replay_sig)
+                volume_gap = (
+                    (not agreed)
+                    and not live_state_only
+                    and _is_unreconstructible_volume_denial(live_sig, replay_sig)
+                )
                 if agreed:
                     agreements += 1
                 elif live_state_only:
@@ -2354,6 +2381,17 @@ class ReplayHarnessService:
                                 "decision_id": decision_id,
                                 "issues": ["live_state_only_denial"],
                                 "live_reason": live_sig[1],
+                            }
+                        )
+                elif volume_gap:
+                    input_gaps += 1
+                    if len(gaps) < 50:
+                        gaps.append(
+                            {
+                                "decision_id": decision_id,
+                                "issues": ["unreconstructible_requested_volume"],
+                                "live_reason": live_sig[1],
+                                "recomputed_reason": replay_sig[1],
                             }
                         )
                 else:
