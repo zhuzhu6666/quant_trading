@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Last verified: 2026-09-14 18:15 (开盘复核后的第二个小批：反事实复盘流自 09-11 断流定位并解堵（白名单纳入 `chain_broken`，`79ba699f`），重启后首个周期产出新复盘并验收；post-fill 接线修复已在 15:30/16:00 两笔真实成交上验收；§2、§3 更新)
+> Last verified: 2026-09-14 18:45 (恢复表完整度列补写入者批：平仓三条路径透传 review 值、今日 3 行 unknown 按 review 回填（2 full + 1 missing）、全表 0 unknown，后端 18:38 重启生效且健康；回放报告随内容重取；剩余下一次真实平仓验证。此前：反事实复盘流解堵并验收，post-fill 接线修复验收)
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -57,7 +57,21 @@ Unresolved live evidence: selection 首个可治理候选（监督闭环退出�
 Next batch: 旧债登记册 §1「recovery_position_state.attribution_integrity 无运行时写入者」（用户已裁定下一批修）
 ```
 
-同内容绑定重取回放报告：`bar_replay_ac33f3d845ee4af2`（23.9s，code_version 随本次 Python 内容更新，grade 仍 C——切片仍落在 09-07 缺口段，见上文「replay 准入重取」）。
+同内容绑定重取回放报告：`bar_replay_3047a2d6c2f54662`（24.4s，code_version 随本次 Python 内容更新——切片仍落在 09-07 缺口段，`matched 74/80、mismatch 13`，grade 口径见上文「replay 准入重取」）。
+
+**本批（2026-09-14 18:38 恢复表完整度列补写入者）**：
+
+```text
+Batch: recovery_position_state.attribution_integrity 在平仓时写入 review 值（原无运行时写入者）
+Canonical authority: RecoveryPositionStore.mark_closed（恢复表唯一的平仓写入者，经 mark_recovery_position_closed 单点透传）；取值 authority 仍是 trade review（本列只做镜像，不自创值）
+Deleted paths: 无删除（开仓 upsert 不动：未平仓时 unknown 语义正确；retire 外层 mark 不传值：内层 replay 已写，COALESCE 保证不覆盖）
+Targeted verification: tests/test_live_recovery_position_store.py 新增 2 例（带值写入 full、不带值保留 chain_broken；去掉写入后两例均失败）；平仓相关 6 文件 195 passed + test_live_service_lifecycle.py 83 passed
+Migration/OpenAPI/build: PG 无变更（0037 列已在）；sqlite 建表语句同步加列（测试/开发镜像与 PG 对齐）
+Runtime verification: 今日 3 行 unknown 按各自 review 回填（288549050 full、288557466 full、288378714 missing），现全表 0 unknown；后端 18:38:37 重启加载新码，ok=true/blockers=[]/ready_for_live_execution=true，live loop blockers=[]/phase=running/accepting_new_risk=true
+Remaining compatibility: 无值调用方（旧 mark/retire 外层）行为不变；列暂无读取方，learning_eligible 仍读 review
+Unresolved live evidence: 下一次真实平仓写入与其 review 一致（见 §3.10）
+Next batch: 常态观察（selection 首个可治理候选、因子 exit (c)、rsi_14 blocked_by_replay 自愈）
+```
 
 ## 3. 未完成 / 待复核证据
 
@@ -76,13 +90,14 @@ Next batch: 旧债登记册 §1「recovery_position_state.attribution_integrity 
 7. **学习建议应用闭环（2026-09-13 修复批；2026-09-14 开盘部分验收）**：三条降权中 `macd_hist`（`gmut_d979fbe50e54…`）与 `di_spread`（`gmut_ce9ca60577e7…`）已落账并 `observing`；`stoch_k` 行以「no actionable live weight」supersede 收口；`learning_workload_gate` 现返回 `run_new_facts`。未闭环一项：`rsi_14` 仍是唯一 `approved` 行（目标 0.89、delta 0.11），被 grade C 的 replay 切片挡在 `blocked_by_replay`；`entry_cluster` live 消费已确认（2026-09-14 15:35/15:40 `learning_same_direction_cooldown` 拒绝同向加仓、15:45 `supervisor_reentry_cooldown` 拒绝平仓后重开、16:00 冷却结束正常成交）。
 8. **post-fill 记录接线断裂（2026-09-14 发现并修复，已验收）**：详见 §2；验收线 = 重启加载新码 + 操作者释放 `no_new_risk_latch` 后，下一笔确认成交的正常走通 `record_*_from_live` 与恢复/归因记录，且不再出现 `confirmed_open_post_fill_processing_failed`。**2026-09-14 17:30 已验收**（15:30 / 16:00 两笔：`ORDER+AMEND OK`、attribution recorded、恢复行 applied、学习样本 `integrity=full`；无硬 latch），条目已从旧债登记册移除。
 9. **反事实复盘流断流（2026-09-14 发现并同批修复，已验收）**：`counterfactual_review` 曾停在 2026-09-11 00:35（198 条），因准入白名单缺 `chain_broken`（L0-0R 后恢复路径已不再产 `restart_replay`），监督员主动平仓的 288549050 因此没有复盘，`position_supervisor_selection.v1` 的 `requires_clean_mature_counterfactual` 随之无法满足。修复 `79ba699f`（白名单纳入 `chain_broken`，执行动作与成交价两道门不变）后 learning worker 重启（18:06 本地），10:09 UTC 周期即为该笔产出首条新复盘：`protection_too_tight` 0.74、`fully_matured`、`maturity.governance_eligible=true`、`selection_eligible=true`、绑定 `binding_verified`，事件 198→199。剩余观察：selection 首个可治理候选按 [legacy-debt-register.md](legacy-debt-register.md) §1 监督闭环退出条件跟踪。
+10. **恢复表完整度列补写入者（2026-09-14 已修，待一次真实平仓验证）**：`mark_closed` 透传 review 值（`COALESCE` 不覆盖已有值）、三条平仓路径接线、今日 3 行 `unknown` 已回填、全表 0 `unknown`，后端 18:38 重启生效（详见 §2）。退出条件收窄为：下一次真实平仓后该行写入与其 review 一致的取值。
 
 上述证据不能由单测、历史快照或 readiness 替代；未满足前不推进后续静态开关，也不把 readiness ready、单次 bridge 或单次 effect 解释为自治毕业。
 
 ## 4. 下一批处理顺序
 
 1. 对 [legacy-debt-register.md](legacy-debt-register.md) 中仍在 `active` / `migrating` / `monitoring` 的路径逐项收集退出证据，canonical 验证后同批删除旧路径。
-1b. 用户已裁定下一批修：`runtime.recovery_position_state.attribution_integrity` 补写入者（平仓/回放路径落 review 的 integrity，替换迁移默认 `unknown`）。
+1b. ~~用户已裁定下一批修：`runtime.recovery_position_state.attribution_integrity` 补写入者~~——2026-09-14 18:38 已执行（见 §2 本批），剩余 §3.10 一次真实平仓验证。
 2. 仅在真实证据满足后运行对应 release gate；保持 active supervisor 走 `governed_execute` 单轨。
 3. 需要修改历史 review、command、sample、maturity 或 `policy_suggestion` 状态时，先走治理通道并获得用户确认口令；不得用 SQL 直接改写。
 

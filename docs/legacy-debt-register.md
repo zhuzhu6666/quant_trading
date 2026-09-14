@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-09-14 (反事实复盘流解堵批：准入白名单纳入 `chain_broken`（`79ba699f`），learning worker 重启后首个 `supervisor_learning` 周期即为本日 15:30 监督员平仓产出复盘并验收；同日 post-fill 记录接线断裂已修复并在两笔真实成交上验收（`ORDER+AMEND OK` / attribution recorded / 学习样本 `integrity=full`），4 小时 latch 已按 cause 释放；因子发现闭环首次流动（21 retire + 11 promote、首个 `PROMOTION_PREPARED`），退出条件 (c) 未达；学习建议应用闭环 (b) 确认（`learning_same_direction_cooldown` 真实触发 2 次）；新增 `recovery_position_state.attribution_integrity` 无写入者条目（用户裁定下一批修）。此前各批追溯走 Git 历史)
+> Last verified: 2026-09-14 18:45 (恢复表完整度列补写入者批：平仓三条路径透传 review 值、今日 3 行 unknown 按 review 回填（2 full + 1 missing）、全表 0 unknown，后端 18:38 重启生效且健康；回放报告随内容重取；剩余下一次真实平仓验证。此前：反事实复盘流解堵并验收，post-fill 接线修复验收)
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归（active / migrating / monitoring / quarantined / regressed）。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -105,13 +105,13 @@
 
 ## 2. 执行与运行时
 
-### recovery_position_state.attribution_integrity 无运行时写入者（2026-09-14 发现，用户裁定下一批修）
+### recovery_position_state.attribution_integrity 无运行时写入者（2026-09-14 发现并同批修复，待一次真实平仓验证）
 
-- 状态：`monitoring`（下一批：平仓/回放路径把 review 的 integrity 写进该列）
-- 事实：0037 迁移为 `runtime.recovery_position_state` 增加 `attribution_integrity TEXT NOT NULL DEFAULT 'unknown'` 并只回填历史行（146 `restart_affected` / 88 `chain_broken`）；`live_recovery_position_store` 的 INSERT 列清单不含该列，运行期无写入者 → 2026-09-13 之后新建的行全部停在默认 `unknown`（按 0037 自身契约，`unknown` = 未分类、会被 `learning_eligible` 拒绝）。
-- 影响：当前为零。学习资格读的是 review payload（`review_learning_eligible`，本日两笔新单产出 `integrity=full`/`train_weight=1.0` 样本），且全仓未发现该列的读取方（2026-09-14 现查）。风险在该列一旦被接入任何门控，会把所有新行判为不可学。
-- 退出：平仓/回放路径写入与 review 一致的取值（`full` / `missing` / `chain_broken` / `restart_affected`），或删除该列并同步迁移与契约。
-- 验证：新建恢复行后该列等于其 review 的 `attribution_integrity`；`select attribution_integrity, count(*) from runtime.recovery_position_state group by 1` 不再新增无来源的 `unknown`。
+- 状态：`monitoring`（2026-09-14 修复并重启生效：三条平仓路径透传 review 值；今日 3 行 `unknown` 已按各自 review 回填（288549050 `full`、288557466 `full`、288378714 `missing`），现全表 0 `unknown`。退出收窄为：下一次真实平仓后该行写入与其 review 一致的取值，即转 resolved）
+- 事实：0037 迁移为 `runtime.recovery_position_state` 增加 `attribution_integrity TEXT NOT NULL DEFAULT 'unknown'` 并只回填历史行（146 `restart_affected` / 88 `chain_broken`）；平仓写入（`RecoveryPositionStore.mark_closed`）的列清单不含该列 → 2026-09-14 的 3 笔新平仓全部停在默认 `unknown`（按 0037 自身契约，`unknown` = 未分类、会被 `learning_eligible` 拒绝）。
+- 修复：`mark_closed` 新增可选 `attribution_integrity`（`COALESCE(?, 列)`：带值则写、不带则保留，任何旧调用方都改不了已有值）；`mark_recovery_position_closed` 单点透传；live 主路径（`live_closed_position_cycle` 主调 + 异常兜底，经 `cleanup_closed_position`）与恢复路径（`live_recovery_close`，取 `payloads["review"]` 现成值）传入；`retire_broker_missing_position` 的外层 mark 无值可传、保持原样（内层 replay 已写）。开仓路径不动（无平仓尚无值，`unknown` 语义正确）。sqlite 建表语句同步加列（与 PG 0037 对齐）。
+- 影响：当前为零。学习资格读的是 review payload（`review_learning_eligible`，本日两笔新单产出 `integrity=full`/`train_weight=1.0` 样本），且该列暂无读取方（2026-09-14 现查）。风险在该列一旦被接入任何门控，会把所有新行判为不可学——本批已堵住新增来源。
+- 验证：`tests/test_live_recovery_position_store.py` 新增 2 例（带值写入、不带值保留；去掉写入后两例均失败）；平仓相关 6 文件 195 passed + `test_live_service_lifecycle.py` 83 passed；回填脚本 `run_artifacts/open_market_verify/backfill_attribution.py`（带守卫：只动 `unknown` 行）；后端 18:38 重启后 `ok=true/blockers=[]/ready_for_live_execution=true`、live loop 无阻断。
 
 ### live tick safety 阶段耗时远超节奏（2026-09-10 登记）
 
