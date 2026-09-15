@@ -426,11 +426,19 @@ def build_factor_admission_evidence(
     if not regime_ids and not canary_ladder_evidence:
         preflight_blockers.append("regime_coverage_missing")
     preflight_blockers = sorted(set(preflight_blockers))
+    # Maiden voyage (2026-09-15): a factor that has never been applied live
+    # cannot carry a cross-agent review binding, and no producer mints a
+    # promote binding for discovered factors -- requiring one deadlocked
+    # promotion forever (0 dsl ACTIVE in history).  The first activation
+    # runs at the bounded new-factor weight with auto-rollback watching, so
+    # the v16 binding is waived exactly once; weight expansion still needs
+    # the full chain (effect + canary contract).
+    maiden_voyage = not governance.get("latest_application_id")
     activation_blockers = list(preflight_blockers)
     if lifecycle_stage == "PROMOTION_PREPARED":
         if not loaded_matches:
             activation_blockers.append("loaded_projection_missing_or_mismatched")
-        if not v16_bound:
+        if not v16_bound and not maiden_voyage:
             activation_blockers.append("v16_binding_missing")
         if not coordinator_bound:
             activation_blockers.append("coordinator_binding_missing")

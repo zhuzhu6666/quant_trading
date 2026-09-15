@@ -1273,3 +1273,33 @@ def test_operator_supersede_quarantined_drifted_builtin(tmp_path):
     state = service.get_state(factor_name="harami")
     assert state["lifecycle_stage"] == FactorLifecycleStage.SHADOW.value
     assert state["factor_id"] != quarantined["factor_id"]
+
+
+def test_activation_ignores_near_zero_ic_for_discovered(lifecycle):
+    """Discovered factors are validated by OOS economics upstream: a
+    near-zero linear IC must not veto activation (2026-09-15: 0 of 2
+    monitored dsl factors cleared 0.02 -- class ban).  Health status,
+    score, sample count and freshness still gate."""
+    import sqlite3
+
+    service, adapter, name, _expression = lifecycle
+    now = time.time()
+    _prepare_and_ack(service, name, now=now)
+    state = service.get_state(factor_name=name)
+    assert str(state.get("origin") or "").lower() in {"dsl", "shadow", "discovered"}
+    conn = sqlite3.connect(service.db_path)
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO factor_health
+               (factor, score, status, n_obs, rolling_ic, updated_at)
+               VALUES (?, 55.0, 'WATCH', 250, 0.005, ?)""",
+            (name, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = _activate_candidate(service, name, weight=0.25, now=now)
+
+    assert result["ok"] is True
+    assert service.get_state(factor_name=name)["lifecycle_stage"] == "ACTIVE"

@@ -639,6 +639,14 @@ class FactorGovernanceOrchestrator:
             actions.extend(fast_retire_actions)
             if _catalog_refresh_required(fast_retire_actions):
                 catalog = build_factor_catalog(self.overlay.db_path)
+            fast_budget = int(getattr(cfg, "factor_governance_fast_retire_per_cycle", 10) or 0)
+            failed_validation_actions = self._retire_failed_validation_shadow(
+                catalog, run, cfg=cfg,
+                max_actions=max(0, fast_budget - len(fast_retire_actions)),
+            )
+            actions.extend(failed_validation_actions)
+            if _catalog_refresh_required(failed_validation_actions):
+                catalog = build_factor_catalog(self.overlay.db_path)
             retire_actions = self._retire_quarantined_discovered(catalog, run)
             actions.extend(retire_actions)
             if _catalog_refresh_required(retire_actions):
@@ -837,15 +845,9 @@ class FactorGovernanceOrchestrator:
                 if len(ordered_ids) > 1
                 else {}
             )
-            # Weight-budget trim: admit a greedy subset of the ordered
-            # manifest that fits the batch total-delta cap instead of
-            # refusing the whole batch (all-or-nothing deadlocked expansion
-            # whenever >=2 candidates were ready, e.g. 4 x 0.30 vs a 0.30
-            # cap).  Refused items keep the same audit reason and stay
-            # actionable in later cycles; backoff tiers them so they cannot
-            # starve other ready candidates.
+            budget_ordered_ids = self._maiden_first_order(ordered_ids, catalog)
             for cid, evidence in self._weight_budget_refusals(
-                ordered_ids,
+                budget_ordered_ids,
                 manifest_by_id,
                 getattr(
                     cfg,
@@ -1115,6 +1117,52 @@ class FactorGovernanceOrchestrator:
             else:
                 seen.setdefault(group_id, cid)
         return guards
+
+    @staticmethod
+    def _is_maiden_item(item: dict[str, Any]) -> bool:
+        """Never-live PREPARED factor: no activation canary contract yet."""
+        return (
+            str(item.get("lifecycle_status") or "").upper()
+            == FactorLifecycleStage.PROMOTION_PREPARED.value
+            and not bool(item.get("activation_canary"))
+        )
+
+    @staticmethod
+    def _maiden_probe_weight(cfg: Any) -> float:
+        """Probe live weight for a maiden voyage (2026-09-15): a bounded
+        sip, not the full new-factor weight -- six maidens fit one batch
+        budget, so maidens stop starving each other.  Reuses the existing
+        demo live-weight floor; no new knob."""
+        full = float(
+            getattr(cfg, "factor_governance_new_factor_weight", 0.0) or 0.0
+        )
+        probe = float(
+            getattr(cfg, "factor_governance_demo_min_live_weight", 0.05) or 0.05
+        )
+        return min(full, probe) if full > 0.0 else probe
+
+    @staticmethod
+    def _maiden_first_order(
+        ordered_ids: list[str], catalog: list[dict[str, Any]]
+    ) -> list[str]:
+        """Maidens first (2026-09-15): a never-live PREPARED factor keeps
+        losing the greedy budget race against already-live expansions,
+        and the backoff tier then buries it deeper each cycle --
+        starvation, not contention.  The budget cap itself is untouched;
+        only the admission order changes, and only for the refusal
+        computation (execution stays in manifest order).
+        """
+        by_id = {str(item.get("factor_id") or ""): item for item in catalog}
+        return sorted(
+            ordered_ids,
+            key=lambda cid: (
+                0
+                if FactorGovernanceOrchestrator._is_maiden_item(
+                    by_id.get(cid) or {}
+                )
+                else 1
+            ),
+        )
 
     @staticmethod
     def _weight_budget_refusals(
@@ -1713,6 +1761,16 @@ class FactorGovernanceOrchestrator:
         # (observed: builtin activation with a stale lifecycle-internal health
         # stamp retried every cycle ahead of eligible shadow promotions).
         recently_blocked = self._recently_blocked_expansion_candidates()
+        # Maidens skip the backoff tier (2026-09-15): their recent blocks
+        # were budget starvation, not evidence failure -- burying them
+        # deeper each cycle turns one crowded batch into permanent exile.
+        maiden_ids = {
+            str(fid)
+            for fid in promotion_ids
+            if str((catalog_by_id.get(str(fid)) or {}).get("lifecycle_status") or "").upper()
+            == FactorLifecycleStage.PROMOTION_PREPARED.value
+            and not bool((catalog_by_id.get(str(fid)) or {}).get("activation_canary"))
+        }
 
         def _candidate_priority(ref: dict[str, Any]) -> tuple[int, str]:
             candidate_id = str(ref.get("candidate_id") or "")
@@ -1726,7 +1784,7 @@ class FactorGovernanceOrchestrator:
                 base = 2
             else:
                 base = 4
-            if candidate_id in recently_blocked:
+            if candidate_id in recently_blocked and candidate_id not in maiden_ids:
                 base += 10
             return (base, candidate_id)
 
@@ -1747,8 +1805,13 @@ class FactorGovernanceOrchestrator:
         new_factor_weight = float(
             getattr(cfg, "factor_governance_new_factor_weight", 0.0) or 0.0
         )
+        maiden_probe_weight = self._maiden_probe_weight(cfg)
         for factor_id in promotion_ids:
-            planned_target.setdefault(str(factor_id), new_factor_weight)
+            item = catalog_by_id.get(str(factor_id)) or {}
+            if self._is_maiden_item(item) and maiden_probe_weight > 0.0:
+                planned_target.setdefault(str(factor_id), maiden_probe_weight)
+            else:
+                planned_target.setdefault(str(factor_id), new_factor_weight)
         for ref in ordered_refs:
             ref_id = str(ref.get("candidate_id") or "")
             ref["planned_weight_delta"] = (
@@ -2856,6 +2919,13 @@ class FactorGovernanceOrchestrator:
                     target_weight = float(
                         getattr(cfg, "factor_governance_new_factor_weight", 0.0) or 0.0
                     )
+                    # Maiden voyage sails light: probe weight, same value
+                    # the manifest planned, so the budget math stays honest.
+                    # Veterans re-activating keep the full new-factor weight.
+                    if stage == FactorLifecycleStage.PROMOTION_PREPARED.value:
+                        probe_weight = self._maiden_probe_weight(cfg)
+                        if probe_weight > 0.0 and self._is_maiden_item(item):
+                            target_weight = probe_weight
                     if target_weight <= 0.0:
                         result = {
                             "ok": False,
@@ -3173,13 +3243,20 @@ class FactorGovernanceOrchestrator:
         fails the state machine on every cycle.
         """
 
+        # Only live (ACTIVE) factors can regress: SHADOW/PREPARED candidates
+        # are owned by the validate/promote/retire legs, and mid-ladder
+        # stages (CANARY_50/PROBATION) are progress, not regression.
+        # Quarantining everything not-yet-ACTIVE starved the pipeline
+        # (2026-09-15: the sole PREPARED candidate was quarantined while
+        # sitting healthy at CANARY_50 waiting for activation).
         regression_stages = {
-            "SHADOW", "CANARY_5", "CANARY_20", "CANARY_50", "PROBATION", "QUARANTINED"
+            "SHADOW", "CANARY_5", "CANARY_20", "QUARANTINED"
         }
         candidates = [
             item
             for item in catalog
             if item.get("source") == "discovered"
+            and str(item.get("lifecycle_status") or "").upper() == "ACTIVE"
             and str((item.get("canary") or {}).get("stage") or "").upper() in regression_stages
         ]
         actions: list[dict[str, Any]] = []
@@ -4619,6 +4696,107 @@ class FactorGovernanceOrchestrator:
                 reason="autonomous governance fast-lane retirement of zero-progress shadow",
                 evidence_refs=evidence,
                 idempotency_key=f"factor_retire:{factor_name}:{run.get('run_id', '')}",
+            )
+            actions.append(self._audit_action(
+                run,
+                item,
+                "retire_factor",
+                "applied" if result.get("ok") else "blocked_by_evidence",
+                evidence,
+                verdict,
+                before={"runtime_config": before_cfg, "lifecycle_status": item.get("lifecycle_status")},
+                after={
+                    "lifecycle_status": str(result.get("lifecycle_stage") or ""),
+                    "mutation_id": str(result.get("mutation_id") or ""),
+                },
+                rollback={"runtime_config": before_cfg},
+                result=result,
+            ))
+        return actions
+
+    def _retire_failed_validation_shadow(
+        self, catalog: list[dict[str, Any]], run: dict[str, Any], *, cfg: Any,
+        max_actions: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Discard leg (2026-09-15): retire SHADOW candidates that decisively
+        failed validation.  Stalled-evidence retirement alone never drains
+        the queue -- a factor with 1400 bars of negative OOS keeps refreshing
+        its window and stays SHADOW forever, blocking GP search behind the
+        500-nonterminal backpressure budget.  The bar is deliberately strict
+        (5x minimum sample, negative economics, below-coin-flip hit rate)
+        and never touches promotion-eligible work.
+        """
+        if max_actions <= 0:
+            return []
+        now = time.time()
+        current_regime_id = str(
+            (self._current_market_regime_projection() or {}).get("regime_id") or ""
+        )
+        candidates = []
+        for item in catalog:
+            if str(item.get("lifecycle_status") or "") != FactorLifecycleStage.SHADOW.value:
+                continue
+            if not str(item.get("lifecycle_factor_id") or ""):
+                continue
+            if str(item.get("lifecycle_origin") or item.get("source") or "") == "builtin":
+                continue
+            perf = item.get("shadow_perf") or {}
+            try:
+                oos_bars = int(perf.get("oos_bars") or 0)
+                n_valid = int(perf.get("n_valid") or 0)
+                cumulative_pnl = float(perf.get("cumulative_pnl") or 0.0)
+                hit_rate = float(perf.get("hit_rate") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if oos_bars < 500 or n_valid < 400:
+                continue
+            if cumulative_pnl > 0.0 or hit_rate >= 0.48:
+                continue
+            if self._factor_has_pending_effect(str(item.get("factor_id") or "")):
+                continue
+            candidates.append((cumulative_pnl, item))
+        # Worst-first, and the full promotion-evidence recompute runs only
+        # on taken candidates: it is the dearest check in this leg.
+        candidates.sort(key=lambda pair: pair[0])
+        actions: list[dict[str, Any]] = []
+        from alpha.registry_adapter import RegistryAdapter
+
+        adapter = RegistryAdapter.shared()
+        lifecycle = FactorLifecycleService(self.overlay.db_path, adapter=adapter)
+        examined = 0
+        for _, item in candidates:
+            if len(actions) >= max_actions or examined >= max_actions + 5:
+                break
+            examined += 1
+            # Never delete promotable work: the stall clock alone must not
+            # decide, and neither must this bar.
+            if self._promotion_evidence(item, cfg).get("eligible"):
+                continue
+            factor_name = str(item["factor_id"])
+            meta = adapter.get_meta(factor_name) or {}
+            perf = item.get("shadow_perf") or {}
+            evidence = {
+                "oos_bars": perf.get("oos_bars"),
+                "n_valid": perf.get("n_valid"),
+                "cumulative_pnl": perf.get("cumulative_pnl"),
+                "hit_rate": perf.get("hit_rate"),
+                "source": item.get("source"),
+                "retire_cause": "validation_failed",
+                "regime_id": current_regime_id,
+            }
+            verdict = self._risk("retire_factor", item, evidence)
+            if not verdict.allowed:
+                actions.append(self._audit_action(run, item, "retire_factor", "blocked_by_risk", evidence, verdict))
+                continue
+            before_cfg = runtime_config.shared().to_dict()
+            result = lifecycle.retire(
+                name=factor_name,
+                expression=str(meta.get("description") or ""),
+                artifact_hash=str(meta.get("artifact_hash") or ""),
+                actor="system:factor_governance",
+                reason="autonomous governance retirement of validation-failed shadow (decisive negative OOS)",
+                evidence_refs=evidence,
+                idempotency_key=f"factor_retire_failed_validation:{factor_name}:{run.get('run_id', '')}",
             )
             actions.append(self._audit_action(
                 run,

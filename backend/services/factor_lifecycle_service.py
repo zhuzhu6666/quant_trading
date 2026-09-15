@@ -2540,19 +2540,29 @@ class FactorLifecycleService:
         rolling_ic = abs(float(health.get("rolling_ic") or 0.0))
         # Activation health gate is aligned with promotion evidence: WATCH +
         # score >= watch threshold is acceptable, not only HEALTHY + >=70.
-        # The promotion evidence check (factor_governance_orchestrator
-        # _promotion_evidence) already accepts {UNKNOWN, HEALTHY, WATCH} or
-        # score >= watch(40); requiring HEALTHY + >=70 at the final lifecycle
-        # gate makes promotion evidence pass but activation impossible for
-        # healthy-enough WATCH factors. IC/n_obs/freshness stay hard checks.
+        # n_obs/freshness stay hard checks for everyone; the linear-IC bar
+        # stays hard for builtins only (see below).
+        # 2026-09-15: discovered (GP) factors are validated by OOS economics
+        # upstream (promotion evidence); a near-zero linear IC must not veto
+        # a factor whose simulated OOS already passed (0 of 2 monitored dsl
+        # factors clear 0.02 -- the IC bar was a de-facto class ban).  IC
+        # stays reported for observability; builtins keep the hard check.
         status_ok = (
             str(health.get("status") or "").upper() in {"HEALTHY", "WATCH"}
             and score >= float(cfg.factor_health_watch_threshold)
         )
+        is_discovered = str(state.get("origin") or "").lower() in {
+            "dsl",
+            "shadow",
+            "discovered",
+        }
+        ic_ok = is_discovered or rolling_ic >= float(
+            cfg.factor_health_ic_active_threshold
+        )
         valid = (
             status_ok
             and n_obs >= int(cfg.factor_health_min_n_obs)
-            and rolling_ic >= float(cfg.factor_health_ic_active_threshold)
+            and ic_ok
             and updated_at > 0
             and -5.0 <= now - updated_at <= self.health_stale_after_sec
         )

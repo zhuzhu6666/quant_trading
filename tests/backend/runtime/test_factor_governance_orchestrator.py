@@ -352,10 +352,12 @@ def test_orchestrator_activates_only_prepared_factor_with_explicit_weight(monkey
             "evidence_fingerprint": "evidence-1",
         },
     )
-
     assert actions[0]["status"] == "applied"
     assert activated[0]["name"] == "shadow_alpha_1"
-    assert activated[0]["weight"] == rc.shared().factor_governance_new_factor_weight
+    # 2026-09-15 maiden rule: never-live PREPARED sails at probe weight.
+    assert activated[0]["weight"] == (
+        FactorGovernanceOrchestrator._maiden_probe_weight(rc.shared())
+    )
     assert activated[0]["v16"].command_id == "v16-command-1"
     assert activated[0]["v16"].evidence_fingerprint == "evidence-1"
 
@@ -2379,6 +2381,8 @@ def test_rollback_canary_regressions_skips_terminal_lifecycle_rows(monkeypatch, 
         def get_state(self, *, factor_name):
             if factor_name == "dsl_terminal":
                 return {"lifecycle_stage": "RETIRED"}
+            if factor_name == "dsl_live_regressed":
+                return {"lifecycle_stage": "ACTIVE"}
             return {"lifecycle_stage": "SHADOW"}
 
         def quarantine(self, *, name, **_kwargs):
@@ -2404,15 +2408,88 @@ def test_rollback_canary_regressions_skips_terminal_lifecycle_rows(monkeypatch, 
             "factor_id": "dsl_terminal",
             "source": "discovered",
             "role": "alpha",
+            "lifecycle_status": "RETIRED",
             "canary": {"stage": "SHADOW"},
         },
         {
             "factor_id": "dsl_live_shadow",
             "source": "discovered",
             "role": "alpha",
+            "lifecycle_status": "SHADOW",
             "canary": {"stage": "SHADOW"},
+        },
+        {
+            # 2026-09-15: PREPARED candidates waiting at CANARY_50 are
+            # progress, not regression; the promote leg owns them.
+            "factor_id": "dsl_prepared_healthy",
+            "source": "discovered",
+            "role": "alpha",
+            "lifecycle_status": "PROMOTION_PREPARED",
+            "canary": {"stage": "CANARY_50"},
+        },
+        {
+            # Only a live factor that fell off the ladder regresses.
+            "factor_id": "dsl_live_regressed",
+            "source": "discovered",
+            "role": "alpha",
+            "lifecycle_status": "ACTIVE",
+            "canary": {"stage": "CANARY_20"},
         },
     ]
     actions = orch._rollback_canary_regressions(catalog, run)
-    assert quarantine_calls == ["dsl_live_shadow"]
+    assert quarantine_calls == ["dsl_live_regressed"]
     assert [a["status"] for a in actions] == ["applied"]
+
+
+def test_maiden_first_budget_order_admits_first_voyage():
+    """A never-live PREPARED factor must not starve behind already-live
+    expansions in the greedy budget pass (2026-09-15: 5x
+    blocked_by_batch_guard on a 0.30 cap).  Cap untouched; order only."""
+    orch_cls = FactorGovernanceOrchestrator
+    catalog = [
+        {
+            "factor_id": "dsl_live_expansion",
+            "lifecycle_status": "ACTIVE",
+            "activation_canary": {"stage": "ACTIVE"},
+        },
+        {
+            "factor_id": "dsl_maiden",
+            "lifecycle_status": "PROMOTION_PREPARED",
+        },
+    ]
+    manifest = {
+        "dsl_live_expansion": {"planned_weight_delta": 0.30},
+        "dsl_maiden": {"planned_weight_delta": 0.30},
+    }
+    ordered = ["dsl_live_expansion", "dsl_maiden"]
+    # Manifest order refuses the maiden under a 0.30 cap.
+    assert set(
+        orch_cls._weight_budget_refusals(ordered, manifest, 0.30)
+    ) == {"dsl_maiden"}
+    # Maiden-first order admits it instead; the cap still holds.
+    budgeted = orch_cls._maiden_first_order(ordered, catalog)
+    assert budgeted[0] == "dsl_maiden"
+    assert set(
+        orch_cls._weight_budget_refusals(budgeted, manifest, 0.30)
+    ) == {"dsl_live_expansion"}
+
+
+def test_maiden_probe_weight_is_a_sip_not_full_size():
+    """Maiden activation sails at the demo floor (2026-09-15): six maidens
+    fit one 0.30 batch instead of starving each other at full size."""
+    from types import SimpleNamespace
+
+    cfg = SimpleNamespace(
+        factor_governance_new_factor_weight=0.30,
+        factor_governance_demo_min_live_weight=0.05,
+    )
+    assert FactorGovernanceOrchestrator._maiden_probe_weight(cfg) == 0.05
+    assert FactorGovernanceOrchestrator._is_maiden_item(
+        {"lifecycle_status": "PROMOTION_PREPARED"}
+    ) is True
+    assert FactorGovernanceOrchestrator._is_maiden_item(
+        {
+            "lifecycle_status": "PROMOTION_PREPARED",
+            "activation_canary": {"stage": "ACTIVE"},
+        }
+    ) is False

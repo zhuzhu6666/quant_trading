@@ -82,3 +82,58 @@ def test_admission_waives_absent_validation_for_canary_ladder_top():
         governance={},
     )
     assert "cost_evidence_missing" in cost_failed["preflight_blocker_codes"]
+
+
+def test_maiden_prepared_activation_waives_v16_binding():
+    """A never-applied PREPARED factor cannot carry a cross-agent review
+    binding (2026-09-15: no producer mints promote bindings for discovered
+    factors, deadlocking activation with 0 dsl ACTIVE in history).  The
+    first activation is waived; a previously-applied factor still needs it."""
+    from backend.services.factor_cards import build_factor_admission_evidence
+
+    def _prepared():
+        return {
+            "factor_id": "dsl_auto_maiden",
+            "role": "alpha",
+            "direction": 1,
+            "health_rolling_ic": 0.03,
+            "lifecycle_status": "PROMOTION_PREPARED",
+            "lifecycle_generation": 1,
+            "lifecycle_artifact_hash": "a" * 64,
+            "lifecycle_definition_fingerprint": "b" * 64,
+            "lifecycle_config_hash": "c" * 64,
+            "lifecycle_factor_id": "dsl:maiden",
+            "lifecycle_mutation_id": "mut-1",
+            "runtime_admission": "projection_acknowledged",
+            "runtime_selection_fingerprint": "f" * 64,
+            "loaded_projection": {
+                "loaded": True,
+                "status": "loaded",
+                "generation": 1,
+                "artifact_hash": "a" * 64,
+            },
+            "lifecycle_evidence": {"v16": {}},
+            "canary": {"stage": "CANARY_50"},
+            "shadow_perf": {
+                "oos_bars": 1200,
+                "n_valid": 90,
+                "evidence_hash": "d" * 64,
+                "dataset_hash": "e" * 64,
+            },
+        }
+
+    maiden = build_factor_admission_evidence(
+        factor_id="dsl_auto_maiden",
+        catalog_item=_prepared(),
+        evidence_counts={},
+        governance={},
+    )
+    assert "v16_binding_missing" not in maiden["activation_blocker_codes"]
+
+    veteran = build_factor_admission_evidence(
+        factor_id="dsl_auto_maiden",
+        catalog_item=_prepared(),
+        evidence_counts={},
+        governance={"latest_application_id": "app-1"},
+    )
+    assert "v16_binding_missing" in veteran["activation_blocker_codes"]
