@@ -34,7 +34,8 @@
 ### 因子发现闭环缺陷（dsl_auto 积压 1,239；2026-09-13 定位并同批修复）
 
 - 状态：`monitoring`（本批修复五处结构缺陷；2026-09-14 开盘复核：队列已开始流动——21 条 `retire_factor` + 11 条 `promote_factor` committed，dsl 604 RETIRED / 15 QUARANTINED / 1218 SHADOW / 1 `PROMOTION_PREPARED`（修复前 594/5/1239/0），catalog 1896→1939、RegistryAdapter 真实 register/unregister、无 `blocked_by_evidence` 洪泛；退出条件 (c) 未达：promote 证据仍带 `activation_blocker_codes=[promotion_not_prepared]`、`blocker_codes=[application_effect_not_mature_positive, controlled_active_canary_contract_missing, …]`）
-- 事实：历史上 0 个 dsl 因子到过 ACTIVE（`factor_lifecycle_state` origin=dsl：RETIRED 594 / QUARANTINED 5 / SHADOW 1,239），
+- 2026-09-15 三步链路重构批（用户批准，不缝补直接拆门）：回滚只认真实退化（ACTIVE 掉出梯子才算，预备位/五十级/观察期不再算退化，当天即止住两起误隔离）；处女航免批条（首次激活不看大脑批条绑定，只看验证加风控）；处女航试探权重（0.05，六个才占一个批量名额，排队时处女航优先且不吃退避埋人）；激活口线性IC硬门对搜出来的因子取消（2个被监控因子0个过0.02，等于整类封杀，OOS说了算，内建因子保留）；新增验证失败即丢弃腿（500根以上样本、负收益、低命中，三者全中才退，每周期至多10个）。首批验证：09-15 08:25 UTC 历史首个 `origin=dsl` 到达 ACTIVE（2个，权重各0.05，已启用），误伤的预备位已放回（一个回影子重攒，一个恢复预备位后转正）。退出条件 (a)(c) 已达，(b) 待队列排到500以下（当时非终态约1100，搜索门禁自动恢复）。
+- 事实（2026-09-15 已改写：2 个 dsl 到达 ACTIVE，见上条；此前历史上 0 个）：`factor_lifecycle_state` origin=dsl 曾为 RETIRED 594 / QUARANTINED 5 / SHADOW 1,239，
   `canary_promotion_blocked_unbacked` 115 条——晋升门与退役门同时不可达，队列只进不出。
 - 根因（只读探针 + 代码定位，全部有据）：
   1. 方向契约投影丢失：catalog 的 `direction` 只读 runtime config，注册期写进 `evidence_json.candidate_validation` 的
