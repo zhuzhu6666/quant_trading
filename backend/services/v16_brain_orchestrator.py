@@ -364,16 +364,24 @@ class V16BrainOrchestratorService:
             )
             review_readiness_gate = (
                 """
-                NOT EXISTS (
+                EXISTS (
                     SELECT 1
                     FROM brain_governance_candidate_review AS current_review
                     WHERE current_review.candidate_id=candidate.candidate_id
-                      AND current_review.bridge_ready=1
-                      AND current_review.created_at>=candidate.updated_at
+                      AND current_review.bridge_ready=0
+                      AND current_review.review_status NOT IN ('needs_evidence', 'submitted')
+                      AND current_review.created_at>=candidate.created_at
+                      AND current_review.review_id=(
+                          SELECT latest.review_id
+                          FROM brain_governance_candidate_review AS latest
+                          WHERE latest.candidate_id=candidate.candidate_id
+                          ORDER BY latest.created_at DESC
+                          LIMIT 1
+                      )
                 )
                 """
                 if state_table_exists(conn, "brain_governance_candidate_review")
-                else "1=1"
+                else "1=0"
             )
             if {
                 "status",
@@ -424,6 +432,7 @@ class V16BrainOrchestratorService:
                       WHERE candidate.candidate_id=v16_brain_command.candidate_id
                         AND (
                             candidate.status NOT IN ('{actionable_statuses}')
+                            OR (candidate.expires_at>0 AND candidate.expires_at<=?)
                             OR {review_readiness_gate}
                             OR (
                                 candidate.status IN ('bridge_pending', 'awaiting_execution', 'submitted')
@@ -434,7 +443,7 @@ class V16BrainOrchestratorService:
                         )
                   )
                 """,
-                (now, now),
+                (now, now, now),
             )
             expired = execute(
                 conn,
@@ -500,12 +509,23 @@ class V16BrainOrchestratorService:
                 """SELECT candidate_id, lineage_json
                    FROM brain_governance_candidate
                    WHERE source_agent='v16_brain' AND status='active'
+                     AND NOT EXISTS (
+                         SELECT 1 FROM v16_brain_command AS current_command
+                         WHERE current_command.candidate_id=brain_governance_candidate.candidate_id
+                           AND current_command.decision='delegate'
+                           AND current_command.claim_status IN ('available', 'claimed')
+                     )
                      AND EXISTS (
                          SELECT 1
                          FROM brain_governance_candidate_review AS current_review
                          WHERE current_review.candidate_id=brain_governance_candidate.candidate_id
                            AND current_review.bridge_ready=1
-                           AND current_review.created_at>=brain_governance_candidate.updated_at
+                           AND current_review.created_at>=brain_governance_candidate.created_at
+                           AND current_review.review_id=(
+                               SELECT latest.review_id FROM brain_governance_candidate_review AS latest
+                               WHERE latest.candidate_id=brain_governance_candidate.candidate_id
+                               ORDER BY latest.created_at DESC LIMIT 1
+                           )
                            AND current_review.created_at<=?
                      )""",
                 (grace_until,),
@@ -1167,6 +1187,7 @@ class V16BrainOrchestratorService:
                 "replay_run_id": replay_run_id,
                 "trace_count": trace_count,
                 "source_suggestion_id": source_suggestion_id,
+                "candidate_review": self._candidate_review_ref(candidate_id),
             },
             "delegation": {
                 "target_agent": "position_supervisor_governance",
@@ -1544,12 +1565,10 @@ class V16BrainOrchestratorService:
         )[:limit]
 
     def _reviewed_expired_delegate_reissues(self, *, limit: int) -> list[dict[str, Any]]:
-        """Refresh reviewed V16 delegates whose downstream bridge is pending.
+        """Re-sign eligible delegates against the latest stable candidate review.
 
-        A command cancelled by lifecycle reconciliation is recoverable only
-        when its candidate still has a valid, unapplied reviewed bridge.  The
-        cancellation reason is diagnostic; it is not an authorization to
-        revive arbitrary failed commands.
+        Unreviewed commands are replaced, never refreshed in place.  Cancelled
+        no-action/failed commands and any consumed binding remain terminal.
         """
         now = time.time()
         conn = connect(self.db_path, read_only=True)
@@ -1557,116 +1576,105 @@ class V16BrainOrchestratorService:
             if not (
                 state_table_exists(conn, "brain_governance_candidate")
                 and state_table_exists(conn, "brain_governance_candidate_review")
+                and state_table_exists(conn, "v16_brain_command")
             ):
                 return []
-            submitted_bridge_recovery = ""
-            policy_suggestion_columns = (
-                set(state_table_columns(conn, "policy_suggestion"))
-                if state_table_exists(conn, "policy_suggestion")
-                else set()
-            )
-            if {
-                "status",
-                "governance_eligible",
-                "applied_mutation_id",
-                "scope_type",
-                "scope_key",
-                "action",
-            }.issubset(policy_suggestion_columns):
-                submitted_bridge_recovery = """
-                    OR (
-                        command.failure_reason='candidate_not_active'
-                        AND candidate.status IN ('bridge_pending', 'awaiting_execution', 'submitted')
-                        AND COALESCE(candidate.submitted_suggestion_id, '')<>''
-                        AND EXISTS (
-                            SELECT 1
-                            FROM policy_suggestion AS suggestion
-                            WHERE suggestion.suggestion_id=candidate.submitted_suggestion_id
-                              AND suggestion.status='approved'
-                              AND COALESCE(suggestion.governance_eligible, 0)=1
-                              AND COALESCE(suggestion.applied_mutation_id, '')=''
-                        )
-                        AND EXISTS (
-                            SELECT 1
-                            FROM brain_governance_candidate_review AS submitted_review
-                            WHERE submitted_review.candidate_id=command.candidate_id
-                              AND submitted_review.bridge_ready=1
-                        )
+            pending_bridge = "1=0"
+            if state_table_exists(conn, "policy_suggestion"):
+                pending_bridge = """
+                    candidate.status IN ('bridge_pending', 'awaiting_execution', 'submitted')
+                    AND EXISTS (
+                        SELECT 1 FROM policy_suggestion AS suggestion
+                        WHERE suggestion.suggestion_id=candidate.submitted_suggestion_id
+                          AND suggestion.status IN ('proposed', 'approved')
+                          AND suggestion.governance_eligible=1
+                          AND COALESCE(suggestion.applied_mutation_id, '')=''
                     )
                 """
+            reviewable = "', '".join(sorted(CANDIDATE_REVIEWABLE_STATUSES))
             rows = execute(
                 conn,
                 f"""
-                SELECT command.command_id, command.snapshot_id, command.plan_id,
-                       command.eval_id, command.candidate_id, command.target_agent,
-                       command.scope_type, command.scope_key, command.action,
-                       command.evidence_json, command.delegation_json,
-                       command.posterior_fingerprint, command.evidence_fingerprint,
-                       command.max_apply_count
+                SELECT command.*
                 FROM v16_brain_command AS command
                 JOIN brain_governance_candidate AS candidate
                   ON candidate.candidate_id=command.candidate_id
                 WHERE command.decision='delegate'
-                  AND command.claim_status='cancelled'
+                  AND (
+                      command.claim_status='available'
+                      OR (command.claim_status='cancelled'
+                          AND command.failure_reason IN ('authority_expired', 'candidate_not_active'))
+                  )
+                  AND COALESCE(command.apply_count, 0)=0
                   AND candidate.source_agent='v16_brain'
                   AND (
-                      (
-                          command.failure_reason='authority_expired'
-                          AND candidate.status='active'
-                          AND COALESCE(candidate.submitted_suggestion_id, '')<>''
-                          AND EXISTS (
-                              SELECT 1
-                              FROM brain_governance_candidate_review AS expired_review
-                              WHERE expired_review.candidate_id=command.candidate_id
-                                AND expired_review.bridge_ready=1
-                                AND expired_review.created_at>command.updated_at
-                          )
-                      )
-                      {submitted_bridge_recovery}
+                      (candidate.status IN ('{reviewable}')
+                       AND COALESCE(candidate.submitted_suggestion_id, '')='')
+                      OR ({pending_bridge})
                   )
                   AND (candidate.expires_at<=0 OR candidate.expires_at>?)
-                  AND command.updated_at=(
-                      SELECT MAX(latest.updated_at)
-                      FROM v16_brain_command AS latest
+                  AND command.command_id=(
+                      SELECT latest.command_id FROM v16_brain_command AS latest
                       WHERE latest.candidate_id=command.candidate_id
                         AND latest.decision='delegate'
+                      ORDER BY latest.created_at DESC, latest.updated_at DESC
+                      LIMIT 1
                   )
                   AND NOT EXISTS (
-                      SELECT 1
-                      FROM v16_brain_command AS current
+                      SELECT 1 FROM v16_brain_command AS current
                       WHERE current.candidate_id=command.candidate_id
                         AND current.decision='delegate'
-                        AND current.claim_status IN ('available', 'claimed', 'finalized')
+                        AND current.command_id<>command.command_id
+                        AND (current.claim_status IN ('available', 'claimed', 'finalized')
+                             OR COALESCE(current.apply_count, 0)>0
+                             OR current.failure_reason NOT IN ('authority_expired', 'candidate_not_active', ''))
                   )
                 ORDER BY command.updated_at ASC
-                LIMIT ?
                 """,
-                (now, max(1, min(int(limit), 50))),
+                (now,),
             ).fetchall()
-            return [
-                {
-                    "command_id": str(row["command_id"] or ""),
-                    "snapshot_id": str(row["snapshot_id"] or ""),
-                    "plan_id": str(row["plan_id"] or ""),
-                    "eval_id": str(row["eval_id"] or ""),
-                    "candidate_id": str(row["candidate_id"] or ""),
-                    "target_agent": str(row["target_agent"] or ""),
-                    "scope_type": str(row["scope_type"] or ""),
-                    "scope_key": str(row["scope_key"] or ""),
-                    "action": str(row["action"] or ""),
-                    "decision": "delegate",
-                    "status": "delegated_to_specialist",
-                    "evidence": loads(row["evidence_json"], {}),
-                    "delegation": loads(row["delegation_json"], {}),
-                    "posterior_fingerprint": str(row["posterior_fingerprint"] or ""),
-                    "evidence_fingerprint": str(row["evidence_fingerprint"] or ""),
-                    "max_apply_count": max(1, int(row["max_apply_count"] or 1)),
-                    "authority_issued_at": now,
-                    "created_at": now,
-                    "updated_at": now,
-                }
-                for row in rows
-            ]
+            reissues = []
+            for row in rows:
+                review = self._candidate_review_ref(str(row['candidate_id'] or ''))
+                if not review.get('bridge_ready') or not review.get('evidence_fingerprint'):
+                    continue
+                evidence = loads(row['evidence_json'], {})
+                bound_review = dict(
+                    evidence.get('candidate_review')
+                    or (evidence.get('governance') or {}).get('candidate_review')
+                    or {}
+                )
+                if (
+                    row['claim_status'] == 'available'
+                    and bound_review.get('evidence_fingerprint') == review['evidence_fingerprint']
+                    and safe_float(row['authority_issued_at']) > now - V16CommandGate._max_age_seconds()
+                ):
+                    continue
+                evidence['candidate_review'] = review
+                reissues.append({
+                    'command_id': str(row['command_id'] or ''),
+                    'snapshot_id': str(row['snapshot_id'] or ''),
+                    'plan_id': str(row['plan_id'] or ''),
+                    'eval_id': str(row['eval_id'] or ''),
+                    'candidate_id': str(row['candidate_id'] or ''),
+                    'target_agent': str(row['target_agent'] or ''),
+                    'scope_type': str(row['scope_type'] or ''),
+                    'scope_key': str(row['scope_key'] or ''),
+                    'action': str(row['action'] or ''),
+                    'decision': 'delegate',
+                    'status': 'delegated_to_specialist',
+                    'evidence': evidence,
+                    'delegation': loads(row['delegation_json'], {}),
+                    'posterior_fingerprint': str(row['posterior_fingerprint'] or ''),
+                    'evidence_fingerprint': hashlib.sha256(dumps(evidence).encode('utf-8')).hexdigest(),
+                    'max_apply_count': max(1, int(row['max_apply_count'] or 1)),
+                    'authority_issued_at': now,
+                    'created_at': now,
+                    'updated_at': now,
+                })
+                if len(reissues) >= max(1, min(int(limit), 50)):
+                    break
+            return reissues
         finally:
             conn.close()
 
@@ -1677,7 +1685,7 @@ class V16BrainOrchestratorService:
                 command_id = str(item.get("command_id") or "")
                 existing = execute(
                     conn,
-                    """SELECT claim_status, failure_reason, last_release_reason
+                    """SELECT claim_status, failure_reason, last_release_reason, evidence_json, authority_issued_at
                        FROM v16_brain_command
                        WHERE command_id=?""",
                     (command_id,),
@@ -1709,6 +1717,31 @@ class V16BrainOrchestratorService:
                     ).fetchone()
                     if no_progress:
                         continue
+                if (
+                    existing
+                    and str(item.get("decision") or "") == "delegate"
+                    and str(existing["claim_status"] or "") == "available"
+                    and (
+                        loads(existing["evidence_json"], {}) != item.get("evidence", {})
+                        or safe_float(existing["authority_issued_at"]) <= time.time() - V16CommandGate._max_age_seconds()
+                    )
+                    and (item.get("evidence") or {}).get("candidate_review", {}).get("bridge_ready")
+                ):
+                    replaced = execute(
+                        conn,
+                        """UPDATE v16_brain_command SET claim_status='cancelled',
+                               failure_reason='candidate_not_active',
+                               last_release_reason='candidate_review_reauthorized',
+                               finalized_at=?, updated_at=?
+                           WHERE command_id=? AND claim_status='available'
+                             AND COALESCE(apply_count, 0)=0""",
+                        (time.time(), time.time(), command_id),
+                    )
+                    if replaced.rowcount != 1:
+                        continue
+                    existing = dict(existing)
+                    existing["claim_status"] = "cancelled"
+                    existing["failure_reason"] = "candidate_not_active"
                 existing_is_reissuable = bool(
                     existing
                     and (

@@ -7,6 +7,7 @@ import pytest
 
 from backend.services.live_autonomy import LiveAutonomyService, ensure_live_autonomy_unlock_table
 from backend.services.proposal_registry import ProposalRegistryService, ensure_proposal_registry_table
+from backend.services.evolution_ledger import persist_runtime_config_snapshot
 from backend.core.db import connect_sqlite
 from config import runtime_config as rc
 
@@ -24,29 +25,40 @@ def _ready_payload() -> dict:
         },
         "execution_semantics": {"effective_send_orders": True},
         "incident_control": {"mode": "normal"},
-        "release": {
-            "ok": True,
-            "latest_release": {"rollback_ref": {"snapshot_hash": "snap1"}, "created_at": now},
-        },
         "replay": {"ok": True, "age_seconds": 10.0, "stale_after_seconds": 86400.0},
         "autonomy_health": {"posture": "full"},
     }
 
 
-def test_live_unlock_evaluation_blocks_missing_replay_and_release(tmp_path):
-    db_path = tmp_path / "state.db"
+def test_live_unlock_requires_replay_and_retrievable_snapshot_without_release_ledger(tmp_path):
+    db_path = tmp_path / "missing.db"
     ensure_live_autonomy_unlock_table(db_path)
     ensure_proposal_registry_table(db_path)
+    service = LiveAutonomyService(db_path)
+
+    result = service.evaluate(readiness=_ready_payload(), refresh_proposals=False, persist=False)
+    assert result["ok"] is False
+    assert any(item["component"] == "runtime_config_snapshot" for item in result["blockers"])
+
+    persist_runtime_config_snapshot(rc.shared(), source="test", db_path=db_path)
     readiness = _ready_payload()
     readiness["replay"] = {"ok": False}
-    readiness["release"] = {"ok": True, "latest_release": {"rollback_ref": {}}}
-
-    result = LiveAutonomyService(db_path).evaluate(readiness=readiness, refresh_proposals=False, persist=False)
-
+    result = service.evaluate(readiness=readiness, refresh_proposals=False, persist=False)
     assert result["ok"] is False
-    components = {item["component"] for item in result["blockers"]}
-    assert "replay" in components
-    assert "release" in components
+    assert any(item["component"] == "replay" for item in result["blockers"])
+
+    result = service.evaluate(readiness=_ready_payload(), refresh_proposals=False, persist=False)
+    assert result["ok"] is True
+
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute("DELETE FROM runtime_config_payload")
+        conn.commit()
+    finally:
+        conn.close()
+    result = service.evaluate(readiness=_ready_payload(), refresh_proposals=False, persist=False)
+    assert result["ok"] is False
+    assert any(item["component"] == "runtime_config_snapshot" for item in result["blockers"])
 
 
 def test_live_unlock_success_persists_overlay_and_event(tmp_path, monkeypatch):
@@ -168,8 +180,9 @@ def test_budget_breach_writes_event_that_registry_routes_to_incident_tighten(tmp
 
 
 @pytest.fixture(autouse=True)
-def _reset_runtime_config():
+def _reset_runtime_config(tmp_path):
     original = rc.shared()
+    persist_runtime_config_snapshot(original, source="test", db_path=tmp_path / "state.db")
     try:
         yield
     finally:

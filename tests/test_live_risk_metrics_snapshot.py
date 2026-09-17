@@ -1,4 +1,5 @@
 import sqlite3
+import time
 
 from backend.services import live_service
 from backend.services.canonical_v2 import ensure_sqlite_schema, record_review
@@ -16,7 +17,7 @@ def test_risk_inputs_use_clean_reviews_and_position_notional(monkeypatch, tmp_pa
         position_id="position-1",
         pnl=12.5,
         review={},
-        created_at=100.0,
+        created_at=time.time(),
     )
     conn.commit()
     conn.close()

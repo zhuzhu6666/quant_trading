@@ -214,9 +214,55 @@ def test_position_supervisor_range_capture_allows_mature_giveback_recommendation
         }
     )
 
-    assert verdict["action"] == "close"
-    assert verdict["summary_reason"] == "profit_giveback_after_mfe"
+    # Reflex ladder (Phase 1): 0.55 <= giveback < 0.90 tightens first even in
+    # range_capture; outright close is reserved for deep giveback.
+    assert verdict["action"] == "tighten"
+    assert verdict["summary_reason"] == "reflex_profit_lock"
     assert verdict["evidence"]["supervisor_posture"] == "range_capture"
+
+    import copy as _copy
+
+    deep = _copy.deepcopy(
+        {
+            "position": {
+                "position_id": "range-capture",
+                "direction": 1,
+                "entry_price": 3000.0,
+                "current_price": 3002.0,
+                "volume": 100.0,
+                "unrealized_pnl": 2.0,
+                "current_price_state": "known",
+                "pnl_state": "known",
+                "sl": 2990.0,
+                "tp": 3040.0,
+            },
+            "risk": {
+                "mfe": 40.0,
+                "mae": 5.0,
+                "giveback_ratio": 0.95,
+                "profit_capture_ratio": 0.05,
+                "holding_efficiency": 0.55,
+                "time_decay_score": 0.8,
+                "thesis_status": "intact",
+                "regime_shift": "none",
+            },
+            "market": {
+                "trend_strength_state": "normal",
+                "volatility_state": "normal",
+                "regime_source": "context_state.market_dimensions",
+                "regime_confidence": 0.8,
+                "regime_id": "trend=normal|volatility=normal",
+                "regime_dimensions": {"trend": "normal", "volatility": "normal"},
+            },
+            "temporal_context": {
+                "holding_seconds": 1800.0,
+                "completed_bars_after_entry": 4,
+            },
+        }
+    )
+    deep_verdict = evaluate_position_supervisor(deep)
+    assert deep_verdict["action"] == "close"
+    assert deep_verdict["summary_reason"] == "reflex_giveback_close"
 
 
 def test_position_supervisor_unknown_market_context_observes_non_hard_management():
@@ -853,3 +899,91 @@ def test_default_template_buffers_thesis_break_close_into_tighten():
     verdict = evaluate_position_supervisor(ready)
     assert verdict["action"] == "tighten"
     assert verdict["summary_reason"] == "thesis_broken_pending_buffer"
+def _reflex_context():
+    # Mirrors 289823293 mid-holding: SHORT in profit, MFE peaked, giving back,
+    # strong trend market, thesis still intact -> posture trend_hold.
+    return {
+        "position_supervisor_template": PROFIT_PROTECTION_TEMPLATE_ID,
+        "position": {
+            "position_id": "reflex-short",
+            "direction": -1,
+            "entry_price": 4316.53,
+            "current_price": 4310.0,
+            "volume": 200.0,
+            "unrealized_pnl": 12.0,
+            "current_price_state": "known",
+            "pnl_state": "known",
+            "sl": 4326.16,
+            "tp": 4302.08,
+        },
+        "risk": {
+            "mfe": 18.93,
+            "mae": 2.0,
+            "giveback_ratio": 0.40,
+            "profit_capture_ratio": 0.60,
+            "holding_efficiency": 0.55,
+            "time_decay_score": 0.80,
+            "thesis_status": "intact",
+            "regime_shift": "none",
+            "original_stop_loss": 4326.16,
+        },
+        "market": {
+            "trend_strength_state": "strong",
+            "volatility_state": "normal",
+            "regime_source": "context_state.market_dimensions",
+            "regime_id": "trend=strong|volatility=normal",
+            "regime_dimensions": {"trend": "strong", "volatility": "normal"},
+            "regime_confidence": 0.8,
+        },
+        "temporal_context": {"holding_seconds": 5400.0},
+    }
+
+
+def test_reflex_breakeven_fires_regardless_of_posture():
+    verdict = evaluate_position_supervisor(_reflex_context())
+    assert verdict["evidence"]["supervisor_posture"] == "trend_hold"
+    assert verdict["recommended_action"] == "tighten"
+    assert verdict["summary_reason"] == "reflex_breakeven_lock"
+    assert verdict["evidence"]["reflex_enabled"] is True
+    target_sl = float(
+        (verdict.get("recommended_controls") or {}).get("target_stop_loss") or 0.0
+    )
+    assert 0.0 < target_sl <= 4316.53
+
+
+def test_reflex_kill_switch_restores_tag_only_hold():
+    ctx = _reflex_context()
+    ctx["position_supervisor_template"] = {
+        "template_id": PROFIT_PROTECTION_TEMPLATE_ID,
+        "reflex_policy": {"reflex_enabled": False},
+    }
+    verdict = evaluate_position_supervisor(ctx)
+    assert verdict["recommended_action"] == "hold"
+    assert verdict["summary_reason"] == "trend_hold_preserve_profit"
+    assert verdict["evidence"]["reflex_enabled"] is False
+def _leash_context(*, entry_score):
+    ctx = _reflex_context()
+    ctx["position"]["current_price"] = 4312.0
+    ctx["position"]["unrealized_pnl"] = 8.0
+    ctx["risk"]["mfe"] = 18.93
+    ctx["risk"]["mae"] = 2.0
+    ctx["risk"]["giveback_ratio"] = 0.25
+    ctx["risk"]["profit_capture_ratio"] = 0.70
+    ctx["entry_context"] = {"entry_score": entry_score}
+    return ctx
+
+
+def test_weak_entry_leash_tightens_earlier():
+    weak = evaluate_position_supervisor(_leash_context(entry_score=0.52))
+    assert weak["recommended_action"] == "tighten"
+    assert weak["summary_reason"] == "reflex_breakeven_lock"
+    assert weak["evidence"]["weak_entry_leash"] is True
+    strong = evaluate_position_supervisor(_leash_context(entry_score=0.80))
+    assert strong["recommended_action"] == "hold"
+    assert strong["evidence"]["weak_entry_leash"] is False
+
+
+def test_supervision_heartbeat_cadence_rule():
+    from backend.services.live_supervision_runtime import supervision_heartbeat_due
+    assert supervision_heartbeat_due(last_ts=0.0, now_ts=1000.0) is True
+    assert supervision_heartbeat_due(last_ts=500.0, now_ts=1000.0) is False

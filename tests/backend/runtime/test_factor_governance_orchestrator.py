@@ -909,6 +909,80 @@ def test_redundancy_preflight_satisfies_v16_fixed_manifest_contract(tmp_path):
     )["allowed"] is True
 
 
+def test_redundancy_cycle_commits_bound_command_and_rejects_changed_patch(monkeypatch, tmp_path):
+    import copy
+    import sqlite3
+    from backend.core import static_feature_flags
+    from backend.services.governance_mutation_coordinator import GovernanceMutationCoordinator
+
+    rc.reset_for_tests()
+    db_path = tmp_path / "state.db"
+    _init_state_db(tmp_path)
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    GovernanceMutationCoordinator(db_path)._prepare_storage()
+    orch.overlay = RuntimeConfigOverlayService(db_path)
+    report = {"group_count": 1, "groups": [{
+        "group_id": "redundancy:auto:rsi_14", "leader": "rsi_14",
+        "members": ["rsi_14", "stoch_k"],
+    }]}
+    monkeypatch.setattr(governance_module, "build_factor_catalog", lambda *_a, **_k: [])
+    monkeypatch.setattr(governance_module.RedundancyDetector, "build_report", lambda *_a, **_k: report)
+    monkeypatch.setattr(orch, "_refresh_shadow_model_evidence", lambda: {})
+    monkeypatch.setattr(orch, "_autonomy_posture", lambda: "autonomous")
+    monkeypatch.setattr(rc, "autonomy_expansion_freeze_applies", lambda _cfg: False)
+    # Select the production authorization branch, but keep every connection on
+    # the isolated test database. Do not change the database routing helpers.
+    monkeypatch.setattr(governance_module, "is_state_db_path", lambda _path: True)
+    monkeypatch.setattr(GovernanceMutationCoordinator, "production_state", property(lambda _self: True))
+    monkeypatch.setattr(static_feature_flags, "shared_static_feature_flags",
+                        lambda: SimpleNamespace(governance_mutation_coordinator_v2_mode="enforce"))
+    token = _posterior_token(db_path)
+    original_apply = orch._apply_redundancy_report
+    tamper = False
+
+    def apply_report(catalog, actual_report, run, **kwargs):
+        if tamper:
+            actual_report = copy.deepcopy(actual_report)
+            actual_report["groups"][0]["group_id"] = "unapproved-group"
+        return original_apply(catalog, actual_report, run, **kwargs)
+    outcomes = []
+    original_audit = orch._audit_action
+
+    def audit(*args, **kwargs):
+        outcomes.append(kwargs["result"])
+        return original_audit(*args, **kwargs)
+
+    monkeypatch.setattr(orch, "_audit_action", audit)
+
+    monkeypatch.setattr(orch, "_apply_redundancy_report", apply_report)
+    before_weights = dict(rc.shared().factor_portfolio_weights)
+    first = orch.run_cycle(v16_handoff={"posterior_fingerprint": token, "health_cycle_id": "regression-1"})
+    assert first["status"] == "ok", first
+    action = next(a for a in first["actions"] if a["action"] == "update_redundancy_groups")
+    assert action["status"] == "applied", outcomes
+    assert rc.shared().factor_signal_config["rsi_14"]["redundancy_group"] == "redundancy:auto:rsi_14"
+    assert dict(rc.shared().factor_portfolio_weights) == before_weights
+    with sqlite3.connect(db_path) as conn:
+        command = conn.execute("SELECT claim_status, apply_count, finalized_mutation_id FROM v16_brain_command WHERE command_id=?",
+                               (first["v16_authority"]["command_id"],)).fetchone()
+        assert command[0:2] == ("finalized", 1)
+        assert conn.execute("SELECT status FROM governance_mutation_intent WHERE mutation_id=?", (command[2],)).fetchone() == ("committed",)
+        committed_count = conn.execute("SELECT count(*) FROM governance_mutation_intent WHERE status='committed'").fetchone()[0]
+    # A subsequent cycle approves a new grouping, but its execution input is
+    # changed after approval. Neither the config nor the ledger may advance.
+    report["groups"][0]["group_id"] = "redundancy:approved-second"
+    tamper = True
+    second = orch.run_cycle(v16_handoff={"posterior_fingerprint": token, "health_cycle_id": "regression-2"})
+    denied = next(a for a in second["actions"] if a["action"] == "update_redundancy_groups")
+    assert denied["status"] == "blocked_by_evidence", denied
+    assert outcomes[-1]["mutation_status"] == "factor_v16_redundancy_patch_mismatch"
+    assert rc.shared().factor_signal_config["rsi_14"]["redundancy_group"] == "redundancy:auto:rsi_14"
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM governance_mutation_intent WHERE status='committed'").fetchone()[0] == committed_count
+        assert conn.execute("SELECT apply_count FROM v16_brain_command WHERE command_id=?", (second["v16_authority"]["command_id"],)).fetchone() == (0,)
+    rc.reset_for_tests()
+
+
 def test_orchestrator_requires_active_canary_before_shadow_promotion():
     rc.reset_for_tests()
     orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())

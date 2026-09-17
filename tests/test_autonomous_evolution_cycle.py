@@ -15,12 +15,11 @@ from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
 from backend.services.v16_command_gate import V16CommandGate
 
 
-def _readiness(*, replay_status: str = "fresh", release_status: str = "completed", posture: str = "full") -> dict:
+def _readiness(*, replay_status: str = "fresh", posture: str = "full") -> dict:
     return {
         "governance": {"autonomy_mode": "demo_nursery"},
         "autonomy_health": {"posture": posture},
         "replay": {"ok": replay_status == "fresh", "status": replay_status},
-        "release": {"ok": release_status == "completed", "status": release_status},
         "live": {"loop": {"status": "running"}},
         "v16": {
             "control_plane_boundaries": {
@@ -182,29 +181,6 @@ def test_autonomous_evolution_cycle_ready_for_guarded_demo_apply(tmp_path, monke
     assert cycle["human_intervention_required"] is False
 
 
-def test_autonomous_evolution_cycle_blocks_failed_release(tmp_path, monkeypatch):
-    db_path = tmp_path / "state.db"
-    ensure_proposal_registry_table(db_path)
-    _create_core_tables(db_path, include_replay=True, include_effect=True)
-    _create_candidate_review(db_path)
-    monkeypatch.setattr(
-        AutonomousEvolutionCycleService,
-        "_chain_health",
-        lambda self: {"ok": True, "status": "ok", "schema_version": "agent_chain_health.v1"},
-    )
-
-    cycle = AutonomousEvolutionCycleService(db_path).status(
-        readiness=_readiness(release_status="failed"),
-    )
-
-    assert cycle["status"] == "needs_attention"
-    assert cycle["stable_demo_nursery_ready"] is False
-    assert any(
-        blocker["component"] == "release" and blocker["status"] == "failed"
-        for blocker in cycle["blockers"]
-    )
-
-
 def test_autonomous_evolution_cycle_treats_routed_stale_proposals_as_work_queue(tmp_path, monkeypatch):
     db_path = tmp_path / "state.db"
     ensure_proposal_registry_table(db_path)
@@ -250,11 +226,7 @@ def test_autonomous_evolution_runner_repairs_then_uses_existing_learning_cycle(t
         "_chain_health",
         lambda self: {"ok": True, "status": "ok", "schema_version": "agent_chain_health.v1"},
     )
-    readiness_after_repair = iter([
-        _readiness(replay_status="fresh", release_status="missing"),
-        _readiness(replay_status="fresh", release_status="completed"),
-        _readiness(replay_status="fresh", release_status="completed"),
-    ])
+    readiness_after_repair = iter([_readiness(), _readiness()])
     monkeypatch.setattr(AutonomousEvolutionNurseryRunner, "_build_readiness", lambda self: next(readiness_after_repair))
     monkeypatch.setattr(
         AutonomousEvolutionNurseryRunner,
@@ -273,17 +245,12 @@ def test_autonomous_evolution_runner_repairs_then_uses_existing_learning_cycle(t
     )
     monkeypatch.setattr(
         AutonomousEvolutionNurseryRunner,
-        "_create_release_evidence",
-        lambda self, *, run_id, readiness, cycle, actions: {"ok": True, "run_id": f"release_{run_id}", "status": "completed"},
-    )
-    monkeypatch.setattr(
-        AutonomousEvolutionNurseryRunner,
         "_run_learning_cycle",
         lambda self, *, sample_limit, recommendation_limit: {"ok": True, "schema_version": "test_learning.v1", "status": "completed"},
     )
 
     result = AutonomousEvolutionNurseryRunner(db_path).run_once(
-        readiness=_readiness(replay_status="stale", release_status="missing"),
+        readiness=_readiness(replay_status="stale"),
         apply_when_ready=True,
         full_learning_cycle=True,
     )
@@ -293,7 +260,6 @@ def test_autonomous_evolution_runner_repairs_then_uses_existing_learning_cycle(t
     assert actions == [
         "run_bar_replay_evidence",
         "refresh_proposal_registry",
-        "record_release_evidence",
         "run_autonomous_learning_cycle",
     ]
     assert result["boundary"]["automatic_full_learning_cycle"] is False
@@ -343,8 +309,6 @@ def test_autonomous_evolution_runner_repairs_replay_with_full_evidence(
         reconcile_effects=False,
         refresh_proposals=False,
         review_candidates=False,
-        create_release_evidence=False,
-        replay_min_interval_sec=0,
     )
 
     replay_action = next(
@@ -353,44 +317,6 @@ def test_autonomous_evolution_runner_repairs_replay_with_full_evidence(
     assert replay_action["ok"] is True
     assert replay_action["result"]["report"]["scope"]["kind"] == "bar_replay_evidence"
     assert calls == [{"lookback_days": 7.0, "limit": 80}]
-
-
-def test_autonomous_evolution_runner_skips_replay_within_interval(tmp_path, monkeypatch):
-    db_path = tmp_path / "state.db"
-    ensure_proposal_registry_table(db_path)
-    _create_core_tables(db_path, include_replay=True, include_effect=True)
-    _create_candidate_review(db_path)
-    monkeypatch.setattr(
-        AutonomousEvolutionCycleService,
-        "_chain_health",
-        lambda self: {"ok": True, "status": "ok", "schema_version": "agent_chain_health.v1"},
-    )
-    monkeypatch.setattr(
-        AutonomousEvolutionNurseryRunner,
-        "_build_readiness",
-        lambda self: _readiness(),
-    )
-    monkeypatch.setattr(
-        ReplayHarnessService,
-        "run_bar_replay_evidence",
-        lambda self, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("replay must be skipped within the interval")
-        ),
-    )
-
-    result = AutonomousEvolutionNurseryRunner(db_path).run_once(
-        readiness=_readiness(replay_status="stale"),
-        reconcile_effects=False,
-        refresh_proposals=False,
-        review_candidates=False,
-        create_release_evidence=False,
-    )
-
-    replay_action = next(
-        item for item in result["actions"] if item["action"] == "run_bar_replay_evidence"
-    )
-    assert replay_action["ok"] is True
-    assert replay_action["status"] == "skipped_replay_interval"
 
 
 def test_autonomous_evolution_runner_defaults_to_small_demo_apply(tmp_path, monkeypatch):
@@ -568,7 +494,6 @@ def test_autonomous_evolution_runner_reports_policy_block_as_blocker(tmp_path, m
 
     result = AutonomousEvolutionNurseryRunner(db_path).run_once(
         refresh_proposals=False,
-        create_release_evidence=False,
         consume_recommended_step=True,
     )
 

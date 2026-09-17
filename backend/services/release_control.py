@@ -19,10 +19,7 @@ from backend.core.state_store import (
 )
 from backend.services.evolution_ledger import current_runtime_config_snapshot
 from backend.services.incident_controls import RuntimeIncidentControlService
-from backend.services.replay_harness import (
-    GOVERNANCE_REPLAY_SCOPE_KIND,
-    ReplayHarnessService,
-)
+from backend.services.replay_harness import ReplayHarnessService
 
 from backend.core.db_helpers import (
     load_json as _loads,
@@ -63,9 +60,6 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return default
-
-
-RELEASE_EVIDENCE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60.0
 
 
 def ensure_release_run_table(db_path: str | Path = STATE_DB) -> None:
@@ -132,8 +126,9 @@ def ensure_release_approval_event_table(db_path: str | Path = STATE_DB) -> None:
 class ReleaseControlService:
     """V15 release run ledger.
 
-    This service records release readiness evidence only. It does not mutate
-    RuntimeConfig, factor weights, orders, or broker state.
+    This service records point-in-time release evidence only, never admission
+    permission. It does not mutate RuntimeConfig, factor weights, orders, or
+    broker state.
     """
 
     VALID_STATUSES = {"started", "completed", "failed", "cancelled"}
@@ -294,153 +289,6 @@ class ReleaseControlService:
             return self._row_to_release(dict(row))
         finally:
             conn.close()
-
-    def status(
-        self,
-        *,
-        stale_after_sec: float = RELEASE_EVIDENCE_MAX_AGE_SECONDS,
-    ) -> dict[str, Any]:
-        latest = self.latest_release()
-        if not latest.get("run_id"):
-            return {
-                "ok": False,
-                "schema_version": "release_readiness.v1",
-                "status": str(latest.get("status") or "missing_release_run"),
-                "latest_release": latest,
-                "stale": True,
-                "stale_after_seconds": float(stale_after_sec),
-                "blockers": ["release_run_missing"],
-            }
-
-        age = max(0.0, time.time() - _safe_float(latest.get("created_at")))
-        stale = age > float(stale_after_sec)
-        snapshot = current_runtime_config_snapshot(
-            db_path=self.db_path,
-            create_if_missing=False,
-        )
-        expected_config_hash = str(snapshot.get("config_hash") or "")
-        release_config_hash = str(latest.get("runtime_config_hash") or "")
-        checklist = dict(latest.get("checklist") or {})
-        checklist_replay = dict(checklist.get("replay") or {})
-        replay_readiness = ReplayHarnessService(self.db_path).status()
-        current_replay = dict(replay_readiness.get("latest_report") or {})
-
-        blockers: list[str] = []
-        release_status = str(latest.get("status") or "unknown")
-        if release_status != "completed":
-            blockers.append("release_status_not_completed")
-        if stale:
-            blockers.append("release_stale")
-        if checklist.get("ok") is not True:
-            blockers.append("release_checklist_not_ready")
-        if str(checklist_replay.get("scope_kind") or "") != GOVERNANCE_REPLAY_SCOPE_KIND:
-            blockers.append("release_replay_scope_mismatch")
-        if not expected_config_hash:
-            blockers.append("runtime_config_hash_unavailable")
-        elif release_config_hash != expected_config_hash:
-            blockers.append("release_runtime_config_hash_mismatch")
-        if replay_readiness.get("ok") is not True:
-            blockers.append("current_replay_not_ready")
-        if str(latest.get("replay_run_id") or "") != str(
-            current_replay.get("replay_run_id") or ""
-        ):
-            blockers.append("release_replay_run_mismatch")
-        if str(latest.get("replay_artifact_hash") or "") != str(
-            current_replay.get("artifact_hash") or ""
-        ):
-            blockers.append("release_replay_artifact_mismatch")
-
-        ok = not blockers
-        if ok:
-            normalized_status = "completed"
-        elif release_status != "completed":
-            normalized_status = release_status
-        elif stale:
-            normalized_status = "stale"
-        elif "release_runtime_config_hash_mismatch" in blockers:
-            normalized_status = "config_mismatch"
-        elif any(reason.startswith("release_replay_") for reason in blockers) or "current_replay_not_ready" in blockers:
-            normalized_status = "replay_mismatch"
-        else:
-            normalized_status = "checklist_failed"
-        return {
-            "ok": ok,
-            "schema_version": "release_readiness.v1",
-            "status": normalized_status,
-            "latest_release": latest,
-            "age_seconds": round(age, 3),
-            "stale": stale,
-            "stale_after_seconds": float(stale_after_sec),
-            "blockers": blockers,
-            "bindings": {
-                "runtime_config_hash": release_config_hash,
-                "expected_runtime_config_hash": expected_config_hash,
-                "runtime_config_hash_matches": bool(
-                    expected_config_hash and release_config_hash == expected_config_hash
-                ),
-                "replay_run_id": str(latest.get("replay_run_id") or ""),
-                "current_replay_run_id": str(current_replay.get("replay_run_id") or ""),
-                "replay_artifact_hash": str(latest.get("replay_artifact_hash") or ""),
-                "current_replay_artifact_hash": str(current_replay.get("artifact_hash") or ""),
-            },
-        }
-
-    def close_stale_started_release(
-        self,
-        *,
-        max_age_seconds: float = 3600.0,
-        actor: str = "system:release_watchdog",
-    ) -> dict[str, Any]:
-        """Cancel one abandoned release without creating a new release run."""
-        latest = self.latest_release()
-        if not latest.get("run_id"):
-            return {"ok": True, "status": "no_release"}
-        if str(latest.get("status") or "") != "started":
-            return {
-                "ok": True,
-                "status": "not_started",
-                "run_id": str(latest.get("run_id") or ""),
-            }
-        age_seconds = max(0.0, time.time() - _safe_float(latest.get("created_at")))
-        threshold = max(300.0, float(max_age_seconds or 3600.0))
-        if age_seconds < threshold:
-            return {
-                "ok": True,
-                "status": "still_fresh",
-                "run_id": str(latest.get("run_id") or ""),
-                "age_seconds": age_seconds,
-                "max_age_seconds": threshold,
-            }
-        summary = dict(latest.get("summary") or {})
-        summary["stale_release_watchdog"] = {
-            "status": "cancelled",
-            "reason": "started_release_exceeded_max_age",
-            "age_seconds": age_seconds,
-            "max_age_seconds": threshold,
-        }
-        result = self.finish_release(
-            str(latest["run_id"]),
-            status="cancelled",
-            summary=summary,
-        )
-        self.record_approval_event(
-            str(latest["run_id"]),
-            action="stale_release_watchdog",
-            actor=actor,
-            decision="cancelled",
-            reason="started_release_exceeded_max_age",
-            evidence_refs={
-                "age_seconds": age_seconds,
-                "max_age_seconds": threshold,
-            },
-        )
-        return {
-            "ok": bool(result.get("ok")),
-            "status": "cancelled",
-            "run_id": str(latest["run_id"]),
-            "age_seconds": age_seconds,
-            "max_age_seconds": threshold,
-        }
 
     def get_release(self, run_id: str) -> dict[str, Any]:
         conn = _connect(self.db_path, read_only=True)

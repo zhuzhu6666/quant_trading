@@ -161,9 +161,11 @@ def test_transition_confirming_profitable_giveback_yields_tighten():
     evidence = verdict.get("evidence") or {}
     assert evidence.get("supervisor_posture") == "transition_confirming"
     assert verdict["action"] == "tighten"
-    assert verdict["summary_reason"] == "transition_profit_protection_tighten"
+    # Reflex ladder (Phase 1) fires first with the same tighten action; the
+    # reason is now posture-independent.
+    assert verdict["summary_reason"] == "reflex_profit_lock"
     evidence_tags = list((verdict.get("evidence") or {}).get("trigger_tags") or [])
-    assert "transition_profit_protection" in evidence_tags
+    assert "reflex_profit_lock" in evidence_tags
     assert "transition_confirming" in evidence_tags
     controls = verdict.get("recommended_controls") or {}
     assert float(controls.get("target_stop_loss") or 0.0) > 0

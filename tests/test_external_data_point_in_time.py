@@ -169,19 +169,24 @@ def test_event_hour_buckets_are_signed_and_windowed(tmp_path):
     finally:
         con.close()
 
-    out = ExternalDataLoader(external, events, event_times={"FOMC": "19:00"}).align_to_bars(
+    # event_times are US/Eastern wall times: 14:00 EST in January = 19:00 UTC.
+    out = ExternalDataLoader(external, events, event_times={"FOMC": "14:00"}).align_to_bars(
         _bars(
-            "2026-01-01 20:00:00",
+            "2026-01-02 18:00:00",
+            "2026-01-02 18:30:00",
+            "2026-01-02 18:45:00",
+            "2026-01-02 19:00:00",
             "2026-01-02 19:30:00",
-            "2026-01-03 20:00:00",
-            "2026-01-05 20:00:00",
+            "2026-01-02 21:00:00",
         )
     )
 
-    assert out.iloc[0]["hours_to_fomc"] == -24
-    assert out.iloc[1]["hours_to_fomc"] == 0
-    assert out.iloc[2]["hours_to_fomc"] == 48
-    assert pd.isna(out.iloc[3]["hours_to_fomc"])
+    assert out.iloc[0]["hours_to_fomc"] == -1.0
+    assert out.iloc[1]["hours_to_fomc"] == -0.5
+    assert out.iloc[2]["hours_to_fomc"] == -0.25
+    assert out.iloc[3]["hours_to_fomc"] == 0.0
+    assert out.iloc[4]["hours_to_fomc"] == 0.5
+    assert pd.isna(out.iloc[5]["hours_to_fomc"])
 
 
 def test_precomputed_macro_derived_columns_are_point_in_time(tmp_path):

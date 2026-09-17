@@ -2212,6 +2212,7 @@ def build_position_supervisor_context_payload(
     temporal_context: dict[str, Any],
     position_metrics: dict[str, Any],
     entry_decision_id: str,
+    entry_score: float = 0.0,
     risk_snapshot: dict[str, Any],
     market_context: dict[str, Any] | None = None,
     supervisor_state: dict[str, Any] | None = None,
@@ -2299,7 +2300,7 @@ def build_position_supervisor_context_payload(
     }
     entry_ctx = {
         "entry_decision_id": entry_decision_id,
-        "entry_score": 0.0,
+        "entry_score": float(entry_score or 0.0),
         "entry_reason": "",
         "factor_set_version": "",
         "policy_version": "",

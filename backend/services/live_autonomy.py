@@ -23,7 +23,6 @@ from risk.policy_service import RiskPolicyService
 
 READINESS_MAX_AGE_SECONDS = 5 * 60.0
 REPLAY_MAX_AGE_SECONDS = 24 * 60 * 60.0
-RELEASE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60.0
 UNLOCK_EVENT_MAX_AGE_SECONDS = 24 * 60 * 60.0
 
 
@@ -498,15 +497,21 @@ class LiveAutonomyService:
         incident = dict(readiness.get("incident_control") or {})
         if str(incident.get("mode") or "normal") != "normal":
             blockers.append({"component": "incident_control", "status": str(incident.get("mode") or "unknown")})
-        release = dict(readiness.get("release") or {})
-        latest_release = dict(release.get("latest_release") or release.get("release") or {})
-        rollback_ref = latest_release.get("rollback_ref") or latest_release.get("rollback_ref_json") or release.get("rollback_ref") or {}
-        if not bool(release.get("ok")):
-            blockers.append({"component": "release", "status": "missing_release"})
-        if isinstance(rollback_ref, str):
-            rollback_ref = _loads(rollback_ref, {})
-        if not (isinstance(rollback_ref, dict) and rollback_ref.get("snapshot_hash")):
-            blockers.append({"component": "release", "status": "missing_snapshot_rollback_ref"})
+        from backend.services.evolution_ledger import current_runtime_config_snapshot
+        from backend.services.state_payloads import read_runtime_config_payload
+
+        try:
+            snapshot = current_runtime_config_snapshot(db_path=self.db_path, create_if_missing=False)
+            conn = _connect(self.db_path, read_only=True)
+            try:
+                rollback_config = _loads(read_runtime_config_payload(conn, str(snapshot.get("payload_hash") or "")), {})
+            finally:
+                conn.close()
+            if not snapshot.get("config_hash") or not isinstance(rollback_config, dict) or not rollback_config:
+                blockers.append({"component": "runtime_config_snapshot", "status": "missing_rollback_snapshot"})
+        except Exception as exc:
+            blockers.append({"component": "runtime_config_snapshot", "status": "rollback_snapshot_unavailable",
+                             "error": f"{type(exc).__name__}: {exc}"})
         replay = dict(readiness.get("replay") or {})
         if not bool(replay.get("ok")):
             blockers.append({"component": "replay", "status": "missing_or_failed"})
@@ -534,12 +539,6 @@ class LiveAutonomyService:
                 readiness.get("replay") or {},
                 now=now,
                 stale_after=REPLAY_MAX_AGE_SECONDS,
-                required=True,
-            ),
-            "release": self._freshness_from_payload(
-                (readiness.get("release") or {}).get("latest_release") or readiness.get("release") or {},
-                now=now,
-                stale_after=RELEASE_MAX_AGE_SECONDS,
                 required=True,
             ),
         }

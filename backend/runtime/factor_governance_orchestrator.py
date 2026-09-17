@@ -918,6 +918,8 @@ class FactorGovernanceOrchestrator:
                             catalog,
                             redundancy_report,
                             run,
+                            v16_authority=v16_authority,
+                            candidate_ref=manifest_by_id[cid],
                         )
                     else:
                         single = [
@@ -2237,13 +2239,22 @@ class FactorGovernanceOrchestrator:
             }
         return patch
 
-    def _apply_runtime_patch(self, patch: dict[str, Any], *, source: str, run_id: str) -> dict[str, Any]:
+    def _apply_runtime_patch(
+        self,
+        patch: dict[str, Any],
+        *,
+        source: str,
+        run_id: str,
+        v16_authority: dict[str, Any] | None = None,
+        governance_evidence_refs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        authority = v16_authority or {}
         factor_keys = list((patch.get("factor_signal_config") or {}).keys())
         risk_reduction = any(
             token in str(source or "").lower()
             for token in ("rollback", "disable", "downweight", "retire", "quarantine")
         )
-        return RuntimeConfigMutationService(overlay=self.overlay).apply_patch(
+        return RuntimeConfigMutationService(self.overlay.db_path, overlay=self.overlay).apply_patch(
             patch,
             source=source,
             run_id=run_id,
@@ -2251,10 +2262,19 @@ class FactorGovernanceOrchestrator:
             action=source,
             audit=False,
             require_v16_command=is_state_db_path(self.overlay.db_path),
+            v16_command_id=str(authority.get("command_id") or ""),
             v16_target_agent="factor_governance",
             v16_scope_type="factor_weight",
-            v16_scope_key=str(factor_keys[0]) if len(factor_keys) == 1 else "alpha_weight_policy",
+            v16_scope_key=(
+                str(authority.get("scope_key") or "alpha_weight_policy")
+                if authority
+                else str(factor_keys[0]) if len(factor_keys) == 1 else "alpha_weight_policy"
+            ),
             v16_action=source,
+            v16_candidate_id=str(authority.get("candidate_id") or ""),
+            v16_posterior_fingerprint=str(authority.get("posterior_fingerprint") or ""),
+            governance_evidence_refs=governance_evidence_refs,
+            governance_evidence_fingerprint=str(authority.get("evidence_fingerprint") or ""),
             risk_reduction=risk_reduction,
         )
 
@@ -2694,6 +2714,9 @@ class FactorGovernanceOrchestrator:
         catalog: list[dict[str, Any]],
         report: dict[str, Any],
         run: dict[str, Any],
+        *,
+        v16_authority: dict[str, Any] | None = None,
+        candidate_ref: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         groups = list(report.get("groups") or [])
         if not groups:
@@ -2703,11 +2726,27 @@ class FactorGovernanceOrchestrator:
         signal_patch = _redundancy_signal_patch(report, signal_cfg)
         if not signal_patch:
             return []
-        result = self._apply_runtime_patch(
-            {"factor_signal_config": signal_patch},
-            source="factor_governance_redundancy",
-            run_id=str(run.get("run_id") or ""),
-        )
+        authority = v16_authority or {}
+        candidate = candidate_ref or {}
+        patch_fingerprint = hashlib.sha256(_dumps(signal_patch).encode("utf-8")).hexdigest()
+        if (authority or candidate) and (
+            str(candidate.get("candidate_id") or "") != "redundancy"
+            or "redundancy" not in str(authority.get("candidate_id") or "").split(",")
+            or patch_fingerprint != str((candidate.get("evidence_refs") or {}).get("patch_fingerprint") or "")
+        ):
+            result = {"ok": False, "status": "factor_v16_redundancy_patch_mismatch"}
+        else:
+            result = self._apply_runtime_patch(
+                {"factor_signal_config": signal_patch},
+                source="factor_governance_redundancy",
+                run_id=str(run.get("run_id") or ""),
+                v16_authority=authority,
+                governance_evidence_refs={
+                    "redundancy_report": report,
+                    "candidate": candidate,
+                    "v16_binding": authority.get("evidence") or {},
+                },
+            )
         committed, projection_ready, mutation_status = self._mutation_commit_state(result)
         item = {"factor_id": "redundancy", "role": "alpha", "source": "catalog"}
         verdict = RiskVerdict(allowed=True, reason="ok", audit_payload={"action": "update_weight"})

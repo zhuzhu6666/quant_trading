@@ -689,6 +689,7 @@ class RuntimeConfig:
     kelly_risk_per_trade_pct: float = 0.05       # 动态 Kelly 单笔/探索实际止损风险上限 5.0%
     kelly_min_closed_trades: int = 20            # 样本不足时 demo 仅最小探索，非 demo 不放大
     kelly_canary_max_api_volume: float = 100.0   # Kelly 育苗期单笔 API volume 上限
+    kelly_sample_since_ts: float = 1789545269.0  # 只统计此时点之后的复盘(4规则上线); 0=不限
     dynamic_sizing_enabled: bool = True          # 是否启用实盘阶梯式动态仓位
     dynamic_sizing_max_api_volume: float = 1000.0 # demo 动态仓位硬上限(API volume)，实际下单仍由 equity 风险预算细分
     dynamic_sizing_api_units_per_display_unit: float = 100.0  # XAUUSD: 100 API volume ~= 1 oz PnL

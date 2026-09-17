@@ -106,7 +106,6 @@ class AutonomousEvolutionCycleService:
         governance = dict(readiness.get("governance") or {})
         autonomy_health = dict(readiness.get("autonomy_health") or {})
         replay = dict(readiness.get("replay") or {})
-        release = dict(readiness.get("release") or {})
         live = dict(readiness.get("live") or {})
         v16 = dict(readiness.get("v16") or {})
         boundaries = dict(v16.get("control_plane_boundaries") or {})
@@ -120,13 +119,11 @@ class AutonomousEvolutionCycleService:
 
         autonomy_mode = str(governance.get("autonomy_mode") or "")
         replay_status = str(replay.get("status") or "")
-        release_status = str(release.get("status") or "")
         posture = str(autonomy_health.get("posture") or "")
         blockers = self._blockers(
             autonomy_mode=autonomy_mode,
             posture=posture,
             replay=replay,
-            release=release,
             proposal_status=proposal_status,
             candidate_review_status=candidate_review_status,
             chain_health=chain_health,
@@ -149,7 +146,6 @@ class AutonomousEvolutionCycleService:
             candidate_status=candidate_status,
             candidate_review_status=candidate_review_status,
             replay=replay,
-            release=release,
             chain_health=chain_health,
             effect=effect,
             boundaries=boundaries,
@@ -169,7 +165,6 @@ class AutonomousEvolutionCycleService:
             "human_intervention_required": False if autonomy_mode in {"demo_nursery", "demo_autonomous"} else True,
             "system_decision_owner": "autonomous_evolution_nursery" if autonomy_mode in {"demo_nursery", "demo_autonomous"} else "operator",
             "replay_status": replay_status or "unknown",
-            "release_status": release_status or "unknown",
             "stable_demo_nursery_ready": status == "ready_for_guarded_demo_apply",
             "blockers": blockers,
             "next_actions": next_actions,
@@ -422,7 +417,6 @@ class AutonomousEvolutionCycleService:
         autonomy_mode: str,
         posture: str,
         replay: dict[str, Any],
-        release: dict[str, Any],
         proposal_status: dict[str, Any],
         candidate_review_status: dict[str, Any],
         chain_health: dict[str, Any],
@@ -439,8 +433,6 @@ class AutonomousEvolutionCycleService:
             blockers.append({"component": "evidence", "status": evidence.get("status"), "reason": "core_or_replay_evidence_not_ready"})
         if replay.get("ok") is not True or str(replay.get("status") or "") != "fresh":
             blockers.append({"component": "replay", "status": replay.get("status"), "reason": "replay_freshness_required"})
-        if release.get("ok") is not True or str(release.get("status") or "") != "completed":
-            blockers.append({"component": "release", "status": release.get("status"), "reason": "release_run_required_for_governed_apply"})
         if int(proposal_status.get("high_unresolved_conflict_count") or 0) > 0:
             blockers.append({"component": "proposal_registry", "status": "conflict", "reason": "high_unresolved_conflicts"})
         hard_stale_count = int(
@@ -514,8 +506,6 @@ class AutonomousEvolutionCycleService:
             return actions
         if "evidence" in components or "replay" in components:
             actions.append({"action": "run_replay", "endpoint": "/api/ops/replay/bar-run", "reason": "fresh_replay_required"})
-        if "release" in components:
-            actions.append({"action": "start_or_finish_release_run", "endpoint": "/api/ops/release/start", "reason": "release_evidence_required"})
         if int(proposal_status.get("active_count") or 0) == 0:
             actions.append({"action": "refresh_proposal_registry", "endpoint": "/api/ops/autonomy/proposals/refresh", "reason": "proposal_bus_empty"})
         if int(candidate_status.get("candidate_count") or 0) > 0 and int(candidate_review_status.get("review_count") or 0) == 0:
@@ -550,7 +540,6 @@ class AutonomousEvolutionCycleService:
         candidate_status: dict[str, Any],
         candidate_review_status: dict[str, Any],
         replay: dict[str, Any],
-        release: dict[str, Any],
         chain_health: dict[str, Any],
         effect: dict[str, Any],
         boundaries: dict[str, Any],
@@ -563,7 +552,6 @@ class AutonomousEvolutionCycleService:
             {"step": "review_candidates", "status": candidate_review_status.get("status"), "ok": bool(candidate_review_status.get("ok")), "bridge_ready_count": candidate_review_status.get("bridge_ready_count", 0)},
             {"step": "candidate_lane", "status": candidate_status.get("status"), "ok": bool(candidate_status.get("ok")), "candidate_count": candidate_status.get("candidate_count", 0)},
             {"step": "check_replay", "status": replay.get("status", "unknown"), "ok": str(replay.get("status") or "") not in {"missing", "stale", "error"}},
-            {"step": "release_control", "status": release.get("status", "unknown"), "ok": str(release.get("status") or "") not in {"missing", "error"}},
             {"step": "single_apply_boundary", "status": "ok" if boundaries else "unknown", "ok": bool(boundaries)},
             {"step": "monitor_effect", "status": effect.get("status"), "ok": bool(effect.get("ok"))},
             {"step": "memory_scorecard_feedback", "status": chain_health.get("status"), "ok": bool(chain_health.get("ok"))},

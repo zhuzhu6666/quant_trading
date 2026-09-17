@@ -33,6 +33,7 @@ from pathlib import Path
 import time as _time
 from bisect import bisect_right, insort
 from collections import deque
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -41,11 +42,13 @@ from backend.core.db import DUCKDB_EVENTS, DUCKDB_EXTERNAL, duckdb_readonly_conn
 
 
 DEFAULT_EVENT_TIMES: dict[str, str] = {
-    "FOMC": "19:00",
-    "NFP": "13:30",
-    "CPI": "13:30",
-    "PCE": "13:30",
+    # US/Eastern wall times; compared against bars in UTC (see _compute_event_hour_buckets).
+    "FOMC": "14:00",
+    "NFP": "08:30",
+    "CPI": "08:30",
+    "PCE": "08:30",
 }
+_EASTERN_TZ = ZoneInfo("America/New_York")
 
 
 def _trailing_rank(
@@ -506,9 +509,14 @@ class ExternalDataLoader:
             mask = events[event_type].fillna(0).astype(int).to_numpy() == 1
             event_datetimes: list[pd.Timestamp] = []
             for date in event_index[mask]:
-                time_str = self.event_times.get(event_type, "13:30")
+                # event_times are US/Eastern wall times; bars compare in UTC.
+                time_str = self.event_times.get(event_type, "08:30")
                 try:
-                    event_datetimes.append(pd.Timestamp(f"{date.date()} {time_str}"))
+                    event_datetimes.append(
+                        pd.Timestamp(f"{date.date()} {time_str}", tz=_EASTERN_TZ)
+                        .tz_convert("UTC")
+                        .tz_localize(None)
+                    )
                 except Exception:
                     continue
             values = np.full(len(bar_index), np.nan)
@@ -525,17 +533,17 @@ class ExternalDataLoader:
 
     @staticmethod
     def _bucket_signed_event_hours(signed_hours: float) -> float:
-        if not np.isfinite(signed_hours) or signed_hours < -48.0 or signed_hours > 48.0:
+        """15-minute buckets inside a +/-1h near window (NaN outside).
+
+        0.0 = release instant (within half a 15-min slice); +/-0.25/0.5/0.75/1.0
+        graduate outward. All nonzero buckets map to near signals downstream.
+        """
+        if not np.isfinite(signed_hours) or signed_hours < -1.0 or signed_hours > 1.0:
             return np.nan
-        if -4.0 <= signed_hours <= 4.0:
+        quantum = round(float(signed_hours) * 4.0) / 4.0
+        if abs(quantum) < 0.125:
             return 0.0
-        if signed_hours < -24.0:
-            return -48.0
-        if signed_hours < 0.0:
-            return -24.0
-        if signed_hours <= 24.0:
-            return 24.0
-        return 48.0
+        return float(max(-1.0, min(1.0, quantum)))
 
     @staticmethod
     def _limit_as_of(df: pd.DataFrame, as_of_epoch: float | None) -> pd.DataFrame:

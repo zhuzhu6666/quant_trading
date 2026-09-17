@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -13,7 +12,7 @@ from backend.services._brain_helpers import connect as _connect
 class AutonomousEvolutionNurseryRunner:
     """Small coordinator for the demo-nursery self-evolution loop.
 
-    The runner deliberately reuses the existing replay, release, candidate
+    The runner deliberately reuses the existing replay, candidate
     review, effect tracker, proposal registry, and autonomous learning services.
     It does not place orders or bypass RiskPolicyService/DecisionPolicy.
     """
@@ -29,7 +28,6 @@ class AutonomousEvolutionNurseryRunner:
             "does_not_bypass_risk_policy": True,
             "does_not_bypass_decision_policy": True,
             "uses_existing_replay_harness": True,
-            "uses_existing_release_control": True,
             "uses_existing_candidate_review": True,
             "demo_nursery_automatic_review_and_bridge": True,
             "demo_nursery_automatic_apply_and_reconcile": True,
@@ -55,7 +53,6 @@ class AutonomousEvolutionNurseryRunner:
                 "repaired_cycle": {},
                 "final_cycle": {},
                 "actions": [],
-                "release_run": {},
                 "boundary": self.boundary(),
             }
         try:
@@ -70,14 +67,12 @@ class AutonomousEvolutionNurseryRunner:
         reconcile_effects: bool = True,
         refresh_proposals: bool = True,
         review_candidates: bool = True,
-        create_release_evidence: bool = True,
         apply_when_ready: bool = False,
         full_learning_cycle: bool = False,
         replay_lookback_days: float = 7.0,
         replay_limit: int = 80,
         review_limit: int = 50,
         effect_limit: int = 50,
-        replay_min_interval_sec: float = 21600.0,
         sample_limit: int = 500,
         recommendation_limit: int = 20,
         suggestion_limit: int = 20,
@@ -176,18 +171,6 @@ class AutonomousEvolutionNurseryRunner:
             readiness=initial_readiness,
             include_chain_health=False,
         )
-        release_cleanup = self._close_stale_release()
-        if str(release_cleanup.get("status") or "") == "cancelled":
-            actions.append({
-                "action": "close_stale_release",
-                "ok": bool(release_cleanup.get("ok")),
-                "result": release_cleanup,
-            })
-            initial_readiness = self._build_readiness()
-            initial_cycle = AutonomousEvolutionCycleService(self.db_path).status(
-                readiness=initial_readiness,
-                include_chain_health=False,
-            )
         if str(initial_cycle.get("status") or "") == "outside_demo_nursery_scope":
             return self._result(
                 run_id=run_id,
@@ -207,28 +190,15 @@ class AutonomousEvolutionNurseryRunner:
 
         components = {str(item.get("component") or "") for item in initial_cycle.get("blockers") or []}
         if replay_if_stale and ("evidence" in components or "replay" in components):
-            replay_gate = self._replay_interval_gate(min_interval_sec=replay_min_interval_sec)
-            if str(replay_gate.get("status") or "") == "due":
-                actions.append(
-                    self._record(
-                        "run_bar_replay_evidence",
-                        lambda: self._run_bar_replay(
-                            lookback_days=replay_lookback_days,
-                            limit=replay_limit,
-                        ),
-                    )
+            actions.append(
+                self._record(
+                    "run_bar_replay_evidence",
+                    lambda: self._run_bar_replay(
+                        lookback_days=replay_lookback_days,
+                        limit=replay_limit,
+                    ),
                 )
-            else:
-                actions.append(
-                    {
-                        "action": "run_bar_replay_evidence",
-                        "ok": True,
-                        "status": "skipped_replay_interval",
-                        "reason": replay_gate.get("reason"),
-                        "age_seconds": replay_gate.get("age_seconds"),
-                        "min_interval_seconds": replay_gate.get("min_interval_seconds"),
-                    }
-                )
+            )
 
         if reconcile_effects and "effect_monitor" in components:
             actions.append(
@@ -288,21 +258,6 @@ class AutonomousEvolutionNurseryRunner:
                 )
             )
 
-        release_run: dict[str, Any] = {}
-        if create_release_evidence and self._release_missing(repaired_cycle):
-            release_run = self._create_release_evidence(
-                run_id=run_id,
-                readiness=repaired_readiness,
-                cycle=repaired_cycle,
-                actions=actions,
-            )
-            actions.append({"action": "record_release_evidence", "ok": bool(release_run.get("ok")), "result": release_run})
-            repaired_readiness = self._build_readiness()
-            repaired_cycle = AutonomousEvolutionCycleService(self.db_path).status(
-                readiness=repaired_readiness,
-                include_chain_health=False,
-            )
-
         if (
             consume_recommended_step
             and bool(repaired_cycle.get("stable_demo_nursery_ready"))
@@ -345,7 +300,7 @@ class AutonomousEvolutionNurseryRunner:
         blocked = False
         errored = False
         for item in actions:
-            if bool(item.get("ok")) or str(item.get("action")) == "record_release_evidence":
+            if bool(item.get("ok")):
                 continue
             action_status = str(item.get("status") or "").strip().lower()
             if action_status.startswith(("blocked_", "waiting_", "skipped_")) or action_status in {
@@ -384,7 +339,6 @@ class AutonomousEvolutionNurseryRunner:
             final_cycle=final_cycle,
             actions=actions,
             status=status,
-            release_run=release_run,
             workload_gate=workload_gate,
         )
 
@@ -398,7 +352,6 @@ class AutonomousEvolutionNurseryRunner:
         final_cycle: dict[str, Any],
         actions: list[dict[str, Any]],
         status: str,
-        release_run: dict[str, Any] | None = None,
         workload_gate: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
@@ -412,7 +365,6 @@ class AutonomousEvolutionNurseryRunner:
             "repaired_cycle": self._cycle_summary(repaired_cycle),
             "final_cycle": self._cycle_summary(final_cycle),
             "actions": actions,
-            "release_run": release_run or {},
             "workload_gate": workload_gate or {},
             "boundary": self.boundary(),
         }
@@ -457,13 +409,11 @@ class AutonomousEvolutionNurseryRunner:
 
     def build_light_readiness(self) -> dict[str, Any]:
         from backend.services.autonomy_health import AutonomyHealthService
-        from backend.services.release_control import ReleaseControlService
         from backend.services.replay_harness import ReplayHarnessService
         from config.runtime_config import shared as runtime_config
 
         cfg = runtime_config()
         replay = ReplayHarnessService(self.db_path).status()
-        release = ReleaseControlService(self.db_path).status()
         health = AutonomyHealthService(self.db_path).latest_snapshot()
         return {
             "schema_version": "autonomous_evolution_runner_light_readiness.v1",
@@ -479,7 +429,6 @@ class AutonomousEvolutionNurseryRunner:
                 "status": str(health.get("status") or ""),
             },
             "replay": replay,
-            "release": release,
             "live": {"loop": {"status": "unknown"}},
             "v16": {
                 "control_plane_boundaries": {
@@ -522,45 +471,6 @@ class AutonomousEvolutionNurseryRunner:
         finally:
             handle.close()
 
-    def _replay_interval_gate(self, *, min_interval_sec: float) -> dict[str, Any]:
-        """Skip replay when the latest successful report is still fresh.
-
-        The cycle blocker only knows replay is stale/degraded; without a
-        recency gate every nursery tick replays the same 7-day window.
-        """
-        try:
-            interval = max(0.0, float(min_interval_sec or 0.0))
-        except (TypeError, ValueError):
-            interval = 0.0
-        if interval <= 0.0:
-            return {"status": "due", "reason": "interval_disabled"}
-        try:
-            from backend.services.replay_harness import ReplayHarnessService
-
-            latest = ReplayHarnessService(self.db_path).latest_report() or {}
-        except Exception:
-            return {"status": "due", "reason": "report_unreadable"}
-        try:
-            created_at = float(latest.get("created_at") or 0.0)
-        except (TypeError, ValueError):
-            created_at = 0.0
-        if created_at <= 0.0 or str(latest.get("status") or "") != "completed" or bool(latest.get("replay_error")):
-            return {"status": "due", "reason": "no_completed_report"}
-        age = max(0.0, time.time() - created_at)
-        if age < interval:
-            return {
-                "status": "skipped",
-                "reason": "replay_interval_not_elapsed",
-                "age_seconds": round(age, 1),
-                "min_interval_seconds": interval,
-            }
-        return {
-            "status": "due",
-            "reason": "replay_interval_elapsed",
-            "age_seconds": round(age, 1),
-            "min_interval_seconds": interval,
-        }
-
     def _run_bar_replay(self, *, lookback_days: float, limit: int) -> dict[str, Any]:
         from backend.services.replay_harness import ReplayHarnessService
 
@@ -584,15 +494,6 @@ class AutonomousEvolutionNurseryRunner:
         from backend.services.proposal_registry import ProposalRegistryService
 
         return ProposalRegistryService(self.db_path).status(refresh=True)
-
-    def _close_stale_release(self) -> dict[str, Any]:
-        from backend.services.release_control import ReleaseControlService
-
-        max_age = float(os.getenv("QUANT_RELEASE_STARTED_MAX_AGE_SEC", "3600") or 3600)
-        return ReleaseControlService(self.db_path).close_stale_started_release(
-            max_age_seconds=max_age,
-            actor="system:autonomous_evolution_nursery_runner",
-        )
 
     def _review_candidates(self, *, limit: int) -> dict[str, Any]:
         from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
@@ -830,52 +731,3 @@ class AutonomousEvolutionNurseryRunner:
             if step in allowed:
                 return dict(item)
         return {}
-
-    @staticmethod
-    def _release_missing(cycle: dict[str, Any]) -> bool:
-        return any(str(item.get("component") or "") == "release" for item in cycle.get("blockers") or [])
-
-    def _create_release_evidence(
-        self,
-        *,
-        run_id: str,
-        readiness: dict[str, Any],
-        cycle: dict[str, Any],
-        actions: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        from backend.services.release_control import ReleaseControlService
-
-        service = ReleaseControlService(self.db_path)
-        tests = [
-            {
-                "name": str(item.get("action") or ""),
-                "ok": bool(item.get("ok")),
-                "status": str(item.get("status") or ""),
-            }
-            for item in actions
-        ]
-        release = service.start_release(
-            release_class="demo_nursery_autonomous_evolution_cycle",
-            summary={
-                "run_id": run_id,
-                "cycle_status": cycle.get("status", ""),
-                "blocker_count": len(cycle.get("blockers") or []),
-            },
-            tests=tests,
-            rollback_ref={"source": "runtime_config_snapshot", "runner": run_id},
-            created_by="system:autonomous_evolution_nursery_runner",
-            readiness=readiness,
-            run_id=f"release_{run_id}",
-        )
-        return service.finish_release(
-            str(release.get("run_id") or f"release_{run_id}"),
-            status="completed",
-            summary={
-                "run_id": run_id,
-                "cycle_status": cycle.get("status", ""),
-                "blockers": cycle.get("blockers") or [],
-            },
-            tests=tests,
-            rollback_ref={"source": "runtime_config_snapshot", "runner": run_id},
-            readiness=readiness,
-        )

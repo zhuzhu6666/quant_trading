@@ -331,7 +331,7 @@ class TestDefaultGPConfig:
             {
                 "rsi_14": 0.5,
                 "stoch_k": 0.4,
-                "bb_width": 0.8,
+                "bb_width": 0.9,
                 "adx": 0.6,
                 "hours_to_nfp": 1.0,
                 "hour_utc": 0.7,

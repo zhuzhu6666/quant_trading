@@ -1136,32 +1136,6 @@ def test_release_approval_trail_is_audit_only(tmp_path):
     assert after["runtime_config_hash"] == "cfg_approval"
 
 
-def test_release_watchdog_cancels_abandoned_started_release(tmp_path):
-    db_path = tmp_path / "state.db"
-    service = ReleaseControlService(db_path)
-    service.start_release(
-        release_class="autonomous_evolution",
-        summary={"scope": "watchdog_test"},
-        run_id="release_stale_test",
-    )
-    conn = connect_sqlite(db_path)
-    try:
-        conn.execute(
-            "UPDATE release_run SET created_at=?, updated_at=? WHERE run_id=?",
-            (time.time() - 7200.0, time.time() - 7200.0, "release_stale_test"),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    result = service.close_stale_started_release(max_age_seconds=3600.0, actor="test:watchdog")
-
-    assert result["status"] == "cancelled"
-    assert service.get_release("release_stale_test")["status"] == "cancelled"
-    trail = service.approval_trail("release_stale_test")
-    assert trail["events"][-1]["action"] == "stale_release_watchdog"
-
-
 def test_incident_playbook_persists_risk_prechecked_plan_without_runtime_mutation(tmp_path):
     db_path = tmp_path / "state.db"
     conn = connect_sqlite(db_path)
@@ -1280,11 +1254,6 @@ def test_v15_phase0_completion_gate_separates_code_and_operational_evidence():
             "mode": "normal",
             "valid_modes": ["normal", "shadow_only", "no_new_risk", "only_close", "frozen"],
         },
-        "release": {
-            "schema_version": "release_readiness.v1",
-            "ok": False,
-            "latest_release": {"ok": False, "status": "missing_release_run"},
-        },
         "autonomy_health": {
             "schema_version": "autonomy_health.v1",
             "score": 0.82,
@@ -1312,7 +1281,6 @@ def test_v15_phase0_completion_gate_separates_code_and_operational_evidence():
     assert phase0["status"] == "complete"
     assert phase0["operational_status"] == "needs_evidence"
     assert "replay_harness_v1" in phase0["evidence_gaps"]
-    assert "release_run_ledger_v1" in phase0["evidence_gaps"]
     assert phase0["read_only"] is True
 
 

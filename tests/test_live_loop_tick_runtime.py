@@ -356,3 +356,17 @@ def test_demo_mode_ignores_observed_session_circuit_and_runs_alpha():
     assert len(process_calls) == 1
     assert plane.marked
     assert result["wait_seconds"] == 5.0
+
+
+def test_select_kelly_regime_pnls_gates_by_deploy_time():
+    from backend.services.live_loop_tick_runtime import select_kelly_regime_pnls
+
+    entries = [
+        (200.0, "new_win", 12.0, False),
+        (150.0, "new_loss", -5.0, False),
+        (100.0, "old_win", 30.0, False),
+        (90.0, "dirty", 9.0, True),
+        (80.0, "new_win", 99.0, False),
+    ]
+    assert select_kelly_regime_pnls(entries, since_ts=120.0) == [12.0, -5.0]
+    assert select_kelly_regime_pnls(entries) == [12.0, -5.0, 30.0]

@@ -718,18 +718,14 @@ def test_context_policy_only_outputs_threshold_and_sizing_effects():
             "session_state": "rollover",
             "macro_context_score": 0.8,
             "macro_evidence_count": 3,
-            "calibrated_probability": 0.52,
-            "confidence_sizing_multiplier": 0.76,
         }
     ).to_dict()
-
     assert result["applied"] is True
     assert result["signal_threshold_delta"] > 0
     assert result["position_multiplier"] == 0.5
     assert "direction" not in result
     assert "event_window_active" in result["reason"]
     assert "macro_context_extreme" in result["reason"]
-    assert "low_calibrated_confidence" in result["reason"]
 
 
 def test_redundancy_detector_groups_live_alpha_only_and_chooses_leader(tmp_path):

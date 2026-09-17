@@ -180,7 +180,6 @@ class AutonomousEvolutionNurseryRunRequest(BaseModel):
     reconcile_effects: bool = True
     refresh_proposals: bool = True
     review_candidates: bool = True
-    create_release_evidence: bool = True
     consume_recommended_step: bool = False
     apply_when_ready: bool = False
     confirm_blocking_apply: bool = False
@@ -511,7 +510,6 @@ def run_autonomous_evolution_nursery_cycle(req: AutonomousEvolutionNurseryRunReq
         reconcile_effects=bool(req.reconcile_effects),
         refresh_proposals=bool(req.refresh_proposals),
         review_candidates=bool(req.review_candidates),
-        create_release_evidence=bool(req.create_release_evidence),
         consume_recommended_step=bool(req.consume_recommended_step),
         apply_when_ready=bool(req.apply_when_ready),
         full_learning_cycle=bool(req.full_learning_cycle),

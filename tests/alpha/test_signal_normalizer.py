@@ -14,6 +14,7 @@ from alpha.signal_normalizer import (
     _normalize_zscore_tanh,
     _normalize_rank,
     _normalize_discrete,
+    _resolve_value_map_ref,
     HOUR_WEIGHTS,
     DAY_WEIGHTS,
 )
@@ -126,6 +127,18 @@ class TestNormalizeDiscrete:
     def test_string_float_key(self):
         value_map = {"-0.8": -0.8, "0.0": 0.0, "0.8": 0.8}
         assert _normalize_discrete(-0.8, value_map) == -0.8
+
+    def test_fomc_weights_resolve_15min_near_window(self):
+        """FOMC 15分钟桶全部落在临近档, 只有发布瞬间是 active."""
+        value_map = _resolve_value_map_ref("fomc_weights")
+        assert _normalize_discrete(0.0, value_map) == 1.0
+        for bucket, expected in [(-1.0, 0.25), (-0.75, 0.5), (-0.5, 0.5),
+                                 (-0.25, 0.75), (0.25, 0.75), (0.5, 0.5),
+                                 (0.75, 0.5), (1.0, 0.25)]:
+            signal = _normalize_discrete(bucket, value_map)
+            assert signal == expected
+            assert 0.0 < signal < 0.9
+        assert _normalize_discrete(-2.0, value_map) == 0.0
 
 
 # ── SignalNormalizer 类测试 ──────────────────────────────

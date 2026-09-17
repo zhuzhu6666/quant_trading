@@ -1,3 +1,4 @@
+import json
 import time
 
 import pytest
@@ -12,6 +13,7 @@ from backend.services.v16_brain_orchestrator import (
     V16BrainOrchestratorService,
     ensure_v16_brain_command_table,
 )
+from backend.services.v16_command_gate import V16CommandGate
 from backend.services.brain_governance_candidate_review import (
     ensure_brain_governance_candidate_review_table,
 )
@@ -375,11 +377,6 @@ def test_reviewed_expired_delegate_is_reissued_once(tmp_path):
     conn = connect_sqlite(db_path)
     try:
         conn.execute(
-            "UPDATE brain_governance_candidate SET submitted_suggestion_id='sug-reissue' "
-            "WHERE candidate_id=?",
-            (candidate_id,),
-        )
-        conn.execute(
             """INSERT INTO brain_governance_candidate_review
                (review_id, candidate_id, review_status, bridge_ready,
                 bridge_reason, evidence_gaps_json, conflict_json,
@@ -432,7 +429,156 @@ def test_reviewed_expired_delegate_is_reissued_once(tmp_path):
     service._persist_commands(reissues)
     # The fresh command is claimable, so the same candidate is not reissued again.
     assert service._reviewed_expired_delegate_reissues(limit=20) == []
+    conn = connect_sqlite(db_path)
+    try:
+        old = conn.execute(
+            "SELECT claim_status, authority_issued_at FROM v16_brain_command WHERE command_id='cmd-expired'"
+        ).fetchone()
+        assert old[0] == "cancelled"
+        assert old[1] == now - 60.0
+        fresh = conn.execute(
+            "SELECT command_id, evidence_json FROM v16_brain_command WHERE claim_status='available'"
+        ).fetchone()
+        assert fresh[0].startswith("cmd-expired_r")
+        assert json.loads(fresh[1])["candidate_review"]["evidence_fingerprint"] == "e" * 64
+        conn.execute(
+            "UPDATE brain_governance_candidate_review SET bridge_ready=0, created_at=? WHERE candidate_id=?",
+            (now + 2.0, candidate_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    assert service._reviewed_expired_delegate_reissues(limit=20) == []
+    service._cancel_non_actionable_commands(persist=True)
+    assert service._reviewed_expired_delegate_reissues(limit=20) == []
 
+
+def test_supervisor_candidate_survives_pre_review_and_claims_reissued_command(tmp_path):
+    """Pre-review cancellation must not fire; review-ready reissue must claim once."""
+    db_path = tmp_path / "state.db"
+    conn = make_canonical_sqlite(db_path)
+    conn.executescript(STATE_DB_DDL)
+    conn.commit()
+    conn.close()
+    ensure_v16_brain_command_table(db_path)
+    ensure_policy_suggestion_table(db_path)
+    ensure_brain_governance_candidate_review_table(db_path)
+    candidate_id = "candidate_mainpath"
+    BrainGovernanceCandidateService(db_path).create_candidate(
+        candidate_id=candidate_id,
+        source_agent="v16_brain",
+        source_kind="brain_medium_impact_governance",
+        source_ref_type="test",
+        source_ref_id="eval-mainpath",
+        proposal_stage="governance_ready",
+        capability_scope="medium_impact_governance",
+        scope_type="factor",
+        scope_key="alpha_weight_policy",
+        action="downweight",
+        confidence=0.8,
+        evidence_score=0.8,
+        risk_class="medium",
+        max_impact="medium_impact",
+        risk_verdict={"allowed": True},
+        status="active",
+        persist=True,
+    )
+    now = time.time()
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            """INSERT INTO v16_brain_command
+               (command_id, candidate_id, target_agent, scope_type, scope_key, action, decision,
+                status, evidence_json, delegation_json, posterior_fingerprint,
+                evidence_fingerprint, max_apply_count, authority_issued_at,
+                created_at, updated_at)
+               VALUES ('cmd-mainpath', ?, 'autonomous_learning', 'factor',
+                       'alpha_weight_policy', 'downweight', 'delegate',
+                       'delegated_to_specialist', '{}', '{}', ?, ?,
+                       1, ?, ?, ?)""",
+            (candidate_id, "p" * 64, "e" * 64, now, now - 60.0, now - 60.0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    service = V16BrainOrchestratorService(db_path)
+    # Reviewing has not happened yet: the wait must not be misread as terminal.
+    service._cancel_non_actionable_commands(persist=True)
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        current = conn.execute(
+            "SELECT claim_status FROM v16_brain_command WHERE command_id='cmd-mainpath'"
+        ).fetchone()
+        assert current[0] == "available"
+    finally:
+        conn.close()
+    # The review must be newer than the candidate, or the reissue stays blocked.
+    review_created = time.time() + 2.0
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            """INSERT INTO brain_governance_candidate_review
+               (review_id, candidate_id, review_status, bridge_ready,
+                bridge_reason, evidence_gaps_json, conflict_json,
+                bridge_preview_json, source_reliability_json,
+                llm_advisory_json, boundary_json, evidence_fingerprint, created_at)
+               VALUES (?, ?, 'bridge_ready', 1, '', '[]', '{}', '{}', '{}', '{}', '{}', ?, ?)""",
+            ("review-mainpath", candidate_id, "m" * 64, review_created),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    reissues = service._reviewed_expired_delegate_reissues(limit=20)
+    assert [item["candidate_id"] for item in reissues] == [candidate_id]
+    service._persist_commands(reissues)
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        fresh = conn.execute(
+            "SELECT command_id, evidence_json FROM v16_brain_command WHERE claim_status='available'"
+        ).fetchone()
+        assert fresh[0].startswith("cmd-mainpath_r")
+    finally:
+        conn.close()
+    # Bridge the candidate so the reissued command is claimable: the command
+    # gate only honours review-bound candidates with a live suggestion.
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            "UPDATE brain_governance_candidate SET status='bridge_pending', submitted_suggestion_id='sug-mainpath' WHERE candidate_id=?",
+            (candidate_id,),
+        )
+        conn.execute(
+            "INSERT INTO policy_suggestion (suggestion_id, scope_type, scope_key, action, status, governance_eligible, applied_mutation_id, created_at) VALUES ('sug-mainpath', 'factor', 'alpha_weight_policy', 'downweight', 'approved', 1, '', ?)",
+            (time.time(),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    first = V16CommandGate.claim(
+        db_path,
+        target_agent="autonomous_learning",
+        scope_type="factor",
+        scope_key="alpha_weight_policy",
+        action="downweight",
+        posterior_fingerprint="p" * 64,
+    )
+    assert first["allowed"] is True, first
+    second = V16CommandGate.claim(
+        db_path,
+        target_agent="autonomous_learning",
+        scope_type="factor",
+        scope_key="alpha_weight_policy",
+        action="downweight",
+        posterior_fingerprint="p" * 64,
+    )
+    assert second["allowed"] is False, second
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        assert conn.execute(
+            "SELECT count(*) FROM v16_brain_command WHERE claim_status='available'"
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
 
 
 def test_v16_delegates_only_qualified_entry_quality_v2_evidence(tmp_path):

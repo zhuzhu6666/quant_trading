@@ -352,6 +352,13 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "mfe_capture_failure_threshold": 0.15,
             "giveback_lock_threshold": 0.35,
         },
+        "reflex_policy": {
+            "reflex_enabled": True,
+            "reflex_min_mfe": 3.0,
+            "breakeven_giveback_ratio": 0.35,
+            "profit_lock_giveback_ratio": 0.55,
+            "giveback_close_ratio": 0.90,
+        },
         "learning_bounds": {
             "max_threshold_delta": 0.12,
             "max_tp_extension_factor": 0.50,
@@ -415,6 +422,13 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "mfe_capture_failure_threshold": 0.18,
             "giveback_lock_threshold": 0.42,
         },
+        "reflex_policy": {
+            "reflex_enabled": True,
+            "reflex_min_mfe": 3.0,
+            "breakeven_giveback_ratio": 0.35,
+            "profit_lock_giveback_ratio": 0.55,
+            "giveback_close_ratio": 0.90,
+        },
         "learning_bounds": {
             "max_threshold_delta": 0.10,
             "max_tp_extension_factor": 0.35,
@@ -474,6 +488,13 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "mfe_capture_failure_threshold": 0.22,
             "giveback_lock_threshold": 0.22,
         },
+        "reflex_policy": {
+            "reflex_enabled": True,
+            "reflex_min_mfe": 3.0,
+            "breakeven_giveback_ratio": 0.35,
+            "profit_lock_giveback_ratio": 0.55,
+            "giveback_close_ratio": 0.90,
+        },
         "learning_bounds": {
             "max_threshold_delta": 0.12,
             "max_tp_extension_factor": 0.45,
@@ -495,7 +516,7 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
 
 def _merge_template(base: dict[str, Any], template: dict[str, Any]) -> dict[str, Any]:
     merged = deepcopy(base)
-    for policy_key in ("thresholds", "sl_policy", "tp_policy", "capture_policy", "learning_bounds"):
+    for policy_key in ("thresholds", "sl_policy", "tp_policy", "capture_policy", "learning_bounds", "reflex_policy"):
         policy = dict(base.get(policy_key) or {})
         policy.update(dict(template.get(policy_key) or {}))
         merged[policy_key] = policy

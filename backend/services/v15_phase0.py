@@ -39,8 +39,6 @@ class V15Phase0CompletionService:
         latest_replay = replay.get("latest_report") if isinstance(replay.get("latest_report"), dict) else {}
         autonomy = readiness.get("autonomy_health") if isinstance(readiness.get("autonomy_health"), dict) else {}
         incident = readiness.get("incident_control") if isinstance(readiness.get("incident_control"), dict) else {}
-        release = readiness.get("release") if isinstance(readiness.get("release"), dict) else {}
-        latest_release = release.get("latest_release") if isinstance(release.get("latest_release"), dict) else {}
         snapshot = v15.get("snapshot") if isinstance(v15.get("snapshot"), dict) else {}
 
         replay_capability_ok = (
@@ -50,16 +48,6 @@ class V15Phase0CompletionService:
             and not replay.get("error")
         )
         replay_evidence_ok = bool(replay.get("ok")) and bool(latest_replay.get("replay_run_id"))
-        release_capability_ok = (
-            str(release.get("schema_version") or "") == "release_readiness.v1"
-            and isinstance(latest_release, dict)
-            and str(latest_release.get("status") or "") != "error"
-        )
-        release_evidence_ok = (
-            release.get("ok") is True
-            and bool(latest_release.get("run_id"))
-            and str(latest_release.get("status") or "") == "completed"
-        )
         gates = [
             _gate(
                 "readiness_contract",
@@ -125,17 +113,6 @@ class V15Phase0CompletionService:
                     "mode": incident.get("mode"),
                     "valid_modes": incident.get("valid_modes") or [],
                     "risk_policy_gate": True,
-                },
-            ),
-            _gate(
-                "release_run_ledger_v1",
-                release_capability_ok,
-                evidence_ok=release_evidence_ok,
-                details={
-                    "latest_run_id": latest_release.get("run_id"),
-                    "latest_status": latest_release.get("status"),
-                    "runtime_config_hash": latest_release.get("runtime_config_hash"),
-                    "replay_run_id": latest_release.get("replay_run_id"),
                 },
             ),
         ]

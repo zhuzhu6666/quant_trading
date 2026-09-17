@@ -141,6 +141,13 @@ class BrainGovernanceCandidateReviewService:
                 candidate_status.get("bridge_reconciliation_required_count") or 0
             )
             if pending_count > 0 or reconciliation_count > 0:
+                if persist:
+                    from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+
+                    orchestrator = V16BrainOrchestratorService(self.db_path)
+                    orchestrator._persist_commands(
+                        orchestrator._reviewed_expired_delegate_reissues(limit=limit)
+                    )
                 return {
                     "ok": pending_count > 0,
                     "schema_version": "brain_governance_candidate_review_run.v1",
@@ -179,6 +186,12 @@ class BrainGovernanceCandidateReviewService:
             )
         if persist:
             self._persist(items)
+            from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+
+            orchestrator = V16BrainOrchestratorService(self.db_path)
+            orchestrator._persist_commands(
+                orchestrator._reviewed_expired_delegate_reissues(limit=limit)
+            )
         return {
             "ok": True,
             "schema_version": "brain_governance_candidate_review_run.v1",

@@ -101,6 +101,31 @@ Unresolved live evidence: 无（本批全部闭环）
 Next batch: 常态观察（selection 首个可治理候选、因子 exit (c)）
 ```
 
+**本批（2026-09-17 发布门拆除，用户批准"拆门，验证挪到使用点"）**：
+
+```text
+Batch: 删除 release 准入红绿判定（ReleaseControlService.status/close_stale_started_release）、nursery 自动补发布与 6h 回放节流、ops 透传参数与 OpenAPI 快照字段；账本只做审计，实盘解锁改读当前配置快照 + replay 有效性
+Canonical authority: ReplayHarnessService（回放唯一生产者；权重写入独立准入与解锁证据共用）；current_runtime_config_snapshot + read_runtime_config_payload（回滚证据）；ReleaseControlService.start/finish（审计账本唯一写入者）
+Deleted paths: status 重验、watchdog 收口、_create_release_evidence/_release_missing/_replay_interval_gate、cycle release blockers/steps、readiness release 段、v15/brain release 门、contract 与 watchdog 旧测
+Targeted verification: 统一重跑 129 passed（cycle/contract/platform_phase0/live_autonomy/readiness 85 + ops/api 44）；live _blockers 隔离 smoke（缺 snapshot 挡/有效通过/坏 replay 挡）；git diff --check 干净、migration 37/37 ok
++Runtime verification: 2026-09-17 01:09:45 三服务受控重启（NRestarts=0），接口 head=4b53a42d 指纹已变（新码加载）；readiness 01:12:07 ok=true、无 release 段、可交易 true；nursery 01:18:53 新进程完成 113.7s，窗口内无 release/blocker 日志，cycle 文件 release 引用 0；live loop 重跑并正常开仓（pos=1）
+Unresolved live evidence: 无（本批闭环；启动期两个慢轮 total 6~7s、account_blockers=none，属重启预热单样本，不断言回归）
+Next batch: 常态观察（selection 首个可治理候选、因子 exit (c)）
+```
+
+**本批（2026-09-17 持仓监督反射层，用户批准整批执行）**：
+
+```text
+Batch: tick级P&L反射（breakeven/lock/close三档，给回吐0.35/0.55/0.90，姿态独立，安全门之下姿态分支之上）；reflex_policy进三份代码模板（默认开，总开关可治理关闭）；弱入场短绳（entry_score|<0.55|时阈值x0.6，entry_score由开仓内存直通，不新增热循环读库）；hold心跳（结论不变每900s留痕，复用trace通道）；姿态tag在反射触发时保留
+Canonical authority: 模板mutation（唯一参数写入者）；tick内tighten/close通道（唯一执行者）；ReplayHarnessService（唯一回放裁判）
+Deleted paths: 无（trend_hold打标保留，只加动作分支）
+Targeted verification: 302 passed（supervisor全家+live保护/生命周期+v16+因子治理，含新增反射/短绳/节拍3用例；2旧用例按梯度语义更新，动作一致）；bar_replay A x2（80/80，mismatch全系旧窗口数据缺口）；git diff --check干净
+Scoreboard baseline（30d/403笔，冻结对照）: 期望值/笔-0.94，PF 0.785，MFE捕获率-0.04，maxDD -444.45，bad_loss 200/403
++Runtime verification: 20:26:37与20:37:19两轮三服务受控重启（NRestarts=0，overlay restored，无闩）；持仓289905563对账找回；health全绿；启动瞬态latch 25s内自解；当日回撤11.8%告警为通知
+Unresolved live evidence: 首条reflex_*真实动作日志+洗出率（24h观察）；MFE捕获率是否抬头；Phase3（第二意见/日内适应）视数据再定
+Next batch: 反射观察 + selection首个可治理候选 + 因子exit (c)
+```
+
 ## 3. 未完成 / 待复核证据
 
 1. **完整生命周期闭环**：S7.6 终验标准已达成并持续（基准 `trade_review_outcome full/1.0 46`，`2026-08-21 → 08-28`）；后续只做常态观察，当前计数、skip/rejected 双轨与 supervisor trace 分级以现查 `canonical_v2` 为准。

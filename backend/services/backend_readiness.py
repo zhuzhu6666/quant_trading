@@ -110,7 +110,6 @@ class BackendReadinessService:
         background_jobs = self._timed_component("background_jobs", self._background_jobs_status)
         replay = self._timed_component("replay", self._replay_status)
         incident_control = self._timed_component("incident_control", self._incident_control_status)
-        release = self._timed_component("release", self._release_status)
         learning_repair = self._timed_component("learning_repair", self._learning_repair_status)
         stability = self._timed_component(
             "stability",
@@ -274,7 +273,6 @@ class BackendReadinessService:
             "background_jobs": background_jobs,
             "replay": replay,
             "incident_control": incident_control,
-            "release": release,
             "learning_repair": learning_repair,
             "learning_worker": learning_worker,
             "autonomy_health": autonomy_health,
@@ -301,7 +299,6 @@ class BackendReadinessService:
                 },
                 "replay": replay,
                 "incident_control": incident_control,
-                "release": release,
                 "autonomy_health": autonomy_health,
                 "control_plane_boundaries": {
                     "runtime_overlay_is_source_of_truth": True,
@@ -1605,19 +1602,6 @@ class BackendReadinessService:
                 "schema_version": "runtime_incident_control.v1",
                 "mode": "unknown",
                 "valid_modes": [],
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-
-    def _release_status(self) -> dict[str, Any]:
-        try:
-            from backend.services.release_control import ReleaseControlService
-
-            return ReleaseControlService(self.db_path).status()
-        except Exception as exc:
-            return {
-                "schema_version": "release_readiness.v1",
-                "ok": False,
-                "status": "error",
                 "error": f"{type(exc).__name__}: {exc}",
             }
 

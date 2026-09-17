@@ -674,6 +674,32 @@ import json
 
 # moved from live_service (2026-09-12 structural repair)
 
+def select_kelly_regime_pnls(
+    entries: list[tuple[float, str, float, bool]],
+    *,
+    since_ts: float = 0.0,
+    limit: int = 200,
+) -> list[float]:
+    """Newest-first (created_at, position_id, pnl, contaminated) -> Kelly PnL sample.
+
+    Only reviews at/after since_ts count (0 disables the gate); contaminated and
+    duplicate positions drop out; capped at the `limit` most recent qualifiers.
+    """
+    out: list[float] = []
+    seen: set[str] = set()
+    cutoff = max(0.0, float(since_ts or 0.0))
+    cap = max(1, int(limit or 200))
+    for created_at, position_id, pnl, contaminated in entries or []:
+        if cutoff > 0 and float(created_at or 0.0) < cutoff:
+            continue
+        if contaminated or position_id in seen:
+            continue
+        seen.add(position_id)
+        out.append(float(pnl or 0.0))
+        if len(out) >= cap:
+            break
+    return out
+
 def _risk_metric_inputs(
     positions: list[dict[str, Any]] | None,
 ) -> tuple[
@@ -704,16 +730,22 @@ def _risk_metric_inputs(
     finally:
         conn.close()
 
-    clean_pnls: list[float] = []
-    seen_positions: set[str] = set()
+    entries: list[tuple[float, str, float, bool]] = []
     for row, review in review_rows:
-        position_id = str(row["position_id"] or "")
         if not isinstance(review, dict):
             continue
-        if position_id in seen_positions or review_has_system_contamination(review):
-            continue
-        seen_positions.add(position_id)
-        clean_pnls.append(float(row["pnl"] or 0.0))
+        entries.append(
+            (
+                float(row.get("created_at") or 0.0),
+                str(row["position_id"] or ""),
+                float(row["pnl"] or 0.0),
+                bool(review_has_system_contamination(review)),
+            )
+        )
+    clean_pnls = select_kelly_regime_pnls(
+        entries,
+        since_ts=float(getattr(cfg, "kelly_sample_since_ts", 0.0) or 0.0),
+    )
 
     normalized_positions = [] if positions is not None else None
     for index, position in enumerate(positions or []):

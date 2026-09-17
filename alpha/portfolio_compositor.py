@@ -291,7 +291,7 @@ class PortfolioCompositor:
         vol_values = [v for v in (finite("bb_width"), finite("atr_ratio"), finite("keltner_width")) if v is not None]
         if vol_values:
             vol_score = max(vol_values, key=abs)
-            volatility_state = "high" if vol_score >= 0.6 else "low" if vol_score <= -0.6 else "normal"
+            volatility_state = "high" if vol_score >= 0.85 else "low" if vol_score <= -0.85 else "normal"
         else:
             vol_score = 0.0
             volatility_state = "unknown"

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from backend.core.db import connect_duckdb
 
@@ -44,13 +45,14 @@ class EventRecord:
     description: str = ""
 
 
-# 默认事件发布时间 (UTC)
+# 默认事件发布时间 (US/Eastern wall time, 转 UTC 后比较)
 DEFAULT_EVENT_TIMES: dict[str, str] = {
-    "FOMC": "19:00",
-    "NFP":  "13:30",
-    "CPI":  "13:30",
-    "PCE":  "13:30",
+    "FOMC": "14:00",
+    "NFP":  "08:30",
+    "CPI":  "08:30",
+    "PCE":  "08:30",
 }
+_EASTERN_TZ = ZoneInfo("America/New_York")
 
 # 默认乘数层级
 DEFAULT_TIERS: dict[int, list[EventTier]] = {
@@ -136,11 +138,12 @@ class EventSizing:
                     conn.close()
 
             for date_str, evt_type, desc, importance in rows:
-                time_str = self.event_times.get(evt_type, "13:30")
+                # event_times are US/Eastern wall times; bars compare in UTC.
+                time_str = self.event_times.get(evt_type, "08:30")
                 try:
                     dt = datetime.strptime(
                         f"{date_str} {time_str}", "%Y-%m-%d %H:%M"
-                    ).replace(tzinfo=timezone.utc)
+                    ).replace(tzinfo=_EASTERN_TZ).astimezone(timezone.utc)
                     self._events.append(EventRecord(
                         dt=dt, event_type=evt_type,
                         importance=importance, description=desc,

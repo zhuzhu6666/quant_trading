@@ -144,11 +144,14 @@ def _resolve_value_map_ref(ref: str) -> dict:
         for d, w in DAY_WEIGHTS.items():
             result[str(d)] = w
     elif ref == "fomc_weights":
-        # Event proximity intensity; direction is handled by alpha factors.
-        result = {"-48": 0.0, "-24": 0.5, "0": 1.0, "24": 0.5, "48": 0.0}
+        # +/-1h near window in 15-min slices; 0 = release instant (active).
+        # Direction is handled by alpha factors.
+        result = {"-1": 0.25, "-0.75": 0.5, "-0.5": 0.5, "-0.25": 0.75,
+                  "0": 1.0, "0.25": 0.75, "0.5": 0.5, "0.75": 0.5, "1": 0.25}
     elif ref == "nfp_weights":
-        # Event proximity intensity; gate/sizing decide how to use it.
-        result = {"-24": 0.5, "0": 1.0, "24": 0.5}
+        # Same 15-min near window shape as FOMC.
+        result = {"-1": 0.25, "-0.75": 0.5, "-0.5": 0.5, "-0.25": 0.75,
+                  "0": 1.0, "0.25": 0.75, "0.5": 0.5, "0.75": 0.5, "1": 0.25}
     _VALUE_MAP_REFS[ref] = result
     return result
 

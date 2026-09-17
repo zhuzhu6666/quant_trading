@@ -424,6 +424,19 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
     near_tp_progress_threshold = _safe_float(thresholds.get("near_take_profit_progress"), 0.92)
     near_sl_progress_threshold = _safe_float(thresholds.get("near_stop_loss_progress"), 0.85)
     near_sl_efficiency_threshold = _safe_float(thresholds.get("near_stop_loss_efficiency_threshold"), 0.25)
+    reflex_policy = template.get("reflex_policy") or {}
+    reflex_enabled = bool(reflex_policy.get("reflex_enabled", False))
+    reflex_min_mfe = _safe_float(reflex_policy.get("reflex_min_mfe"), 3.0)
+    reflex_breakeven_ratio = _safe_float(reflex_policy.get("breakeven_giveback_ratio"), 0.35)
+    reflex_lock_ratio = _safe_float(reflex_policy.get("profit_lock_giveback_ratio"), 0.55)
+    reflex_close_ratio = _safe_float(reflex_policy.get("giveback_close_ratio"), 0.90)
+    entry_score_abs = abs(
+        _safe_float((position_context.get("entry_context") or {}).get("entry_score"))
+    )
+    weak_entry_leash = bool(0.0 < entry_score_abs < 0.55)
+    if weak_entry_leash:
+        reflex_breakeven_ratio = reflex_breakeven_ratio * 0.6
+        reflex_lock_ratio = reflex_lock_ratio * 0.6
     take_profit_progress = _target_progress(
         direction=direction,
         entry_price=entry_price,
@@ -637,6 +650,51 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         action = "close"
         summary_reason = "near_stop_loss_preemptive_exit"
         severity = "warn"
+    elif (
+        reflex_enabled
+        and price_known
+        and pnl_known
+        and path_metrics_known
+        and management_closed_bar_window_ready
+        and mfe >= reflex_min_mfe
+        and current_pnl > 0
+        and giveback_ratio >= reflex_close_ratio
+    ):
+        trigger_tags.append(supervisor_posture)
+        trigger_tags.append("reflex_giveback_close")
+        action = "close"
+        summary_reason = "reflex_giveback_close"
+        severity = "warn"
+    elif (
+        reflex_enabled
+        and price_known
+        and pnl_known
+        and path_metrics_known
+        and management_closed_bar_window_ready
+        and mfe >= reflex_min_mfe
+        and current_pnl > 0
+        and giveback_ratio >= reflex_lock_ratio
+    ):
+        trigger_tags.append(supervisor_posture)
+        trigger_tags.append("reflex_profit_lock")
+        action = "tighten"
+        summary_reason = "reflex_profit_lock"
+        severity = "warn"
+    elif (
+        reflex_enabled
+        and price_known
+        and pnl_known
+        and path_metrics_known
+        and management_closed_bar_window_ready
+        and mfe >= reflex_min_mfe
+        and current_pnl > 0
+        and giveback_ratio >= reflex_breakeven_ratio
+    ):
+        trigger_tags.append(supervisor_posture)
+        trigger_tags.append("reflex_breakeven_lock")
+        action = "tighten"
+        summary_reason = "reflex_breakeven_lock"
+        severity = "info"
     elif supervisor_posture == "exit_commit":
         if thesis_break_ready and thesis_break_confirmed:
             buffer_min_delta = _safe_float(sl_policy.get("min_stop_tighten_points"), 0.01)
@@ -908,6 +966,21 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "mfe_is_meaningful": bool(mfe >= capture_mfe_floor),
         "management_evidence_ready": bool(management_evidence_ready),
         "profit_protection_window_ready": bool(profit_protection_window_ready),
+        "reflex_enabled": bool(reflex_enabled),
+        "reflex_window_ready": bool(
+            reflex_enabled
+            and price_known
+            and pnl_known
+            and path_metrics_known
+            and management_closed_bar_window_ready
+            and mfe >= reflex_min_mfe
+            and current_pnl > 0
+        ),
+        "reflex_breakeven_ratio": round(reflex_breakeven_ratio, 6),
+        "reflex_lock_ratio": round(reflex_lock_ratio, 6),
+        "reflex_close_ratio": round(reflex_close_ratio, 6),
+        "entry_score_abs": round(entry_score_abs, 6),
+        "weak_entry_leash": bool(weak_entry_leash),
         # Model influence is advisory and may only act after the same
         # meaningful-profit evidence window used by discretionary protection.
         "model_action_boundary_ready": bool(profit_protection_window_ready),

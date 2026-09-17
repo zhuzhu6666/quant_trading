@@ -1,7 +1,7 @@
 """V16 live-ready guardrail.
 
 ``BrainLiveReadyGuardrailService`` evaluates whether live capability is bounded
-(lock, broker/local divergence, incident memory, release rollback).  It is the
+(lock, broker/local divergence, incident memory). It is the
 one Phase-5 piece with a live consumer: ``LiveAutonomyService`` reads its
 ``broker_local_divergence`` verdict before unlocking live autonomy.
 
@@ -96,11 +96,10 @@ class BrainLiveReadyGuardrailService:
         divergence = self._broker_local_divergence(readiness)
         incident = self._incident_control(readiness)
         incident_memory = self._incident_memory()
-        release_rollback = self._release_rollback(readiness)
         p3_p4 = self._p3_p4_evidence(readiness)
         recommendation = self._recommendation(live_lock=live_lock, divergence=divergence,
                                                incident=incident, incident_memory=incident_memory,
-                                               release_rollback=release_rollback, p3_p4=p3_p4)
+                                               p3_p4=p3_p4)
         risk_precheck = RiskPolicyService.shared().evaluate("set_incident_control", {
             "current_mode": incident.get("mode", "normal"),
             "target_mode": recommendation.get("target_mode", "no_new_risk"),
@@ -111,7 +110,7 @@ class BrainLiveReadyGuardrailService:
                    "schema_version": "brain_live_ready_guardrail.v1", "status": status, "source": source,
                    "live_capability_lock": live_lock, "broker_local_divergence": divergence,
                    "incident_control": incident, "incident_memory": incident_memory,
-                   "release_rollback": release_rollback, "p3_p4_evidence": p3_p4,
+                   "p3_p4_evidence": p3_p4,
                    "action_recommendation": recommendation, "risk_precheck": risk_precheck,
                    "boundary": self.boundary(), "created_at": now, "updated_at": now}
         if persist:
@@ -127,7 +126,7 @@ class BrainLiveReadyGuardrailService:
                 return self._missing_status("missing_table")
             rows = execute(conn, """SELECT guardrail_id, status, live_capability_lock_json,
                 broker_local_divergence_json, incident_control_json, incident_memory_json,
-                release_rollback_json, p3_p4_evidence_json, action_recommendation_json,
+                p3_p4_evidence_json, action_recommendation_json,
                 risk_precheck_json, boundary_json, created_at, updated_at
                 FROM brain_live_ready_guardrail ORDER BY created_at DESC LIMIT ?""", (limit,)).fetchall()
             return {"ok": bool(rows), "schema_version": "brain_live_ready_guardrail_list.v1",
@@ -177,7 +176,6 @@ class BrainLiveReadyGuardrailService:
         loop = dict(live.get("loop") or {})
         execution = dict(readiness.get("execution_semantics") or {})
         incident = dict(readiness.get("incident_control") or {})
-        release = dict(readiness.get("release") or {})
         replay = dict(readiness.get("replay") or {})
         autonomy = dict(readiness.get("autonomy_health") or {})
         blockers = []
@@ -191,11 +189,6 @@ class BrainLiveReadyGuardrailService:
             blockers.append("send_orders_disabled_or_unknown")
         if str(incident.get("mode") or "normal") != "normal":
             blockers.append("incident_mode_not_normal")
-        if not bool(release.get("ok")):
-            blockers.append("missing_release_run")
-        latest_release = dict(release.get("latest_release") or {})
-        if latest_release and not dict(latest_release.get("rollback_ref") or {}).get("snapshot_hash"):
-            blockers.append("release_missing_snapshot_rollback_ref")
         if not bool(replay.get("ok")):
             blockers.append("missing_replay_evidence")
         if str(autonomy.get("posture") or "full") not in {"full", "constrained"}:
@@ -204,7 +197,7 @@ class BrainLiveReadyGuardrailService:
                 "inputs": {"broker_status": str(ctrader.get("status") or ""), "loop_running": bool(loop.get("running")),
                            "effective_send_orders": bool(execution.get("effective_send_orders", True)),
                            "incident_mode": str(incident.get("mode") or "normal"),
-                           "release_ok": bool(release.get("ok")), "replay_ok": bool(replay.get("ok")),
+                           "replay_ok": bool(replay.get("ok")),
                            "autonomy_posture": str(autonomy.get("posture") or "")}}
 
     def _broker_local_divergence(self, readiness: dict[str, Any]) -> dict[str, Any]:
@@ -239,15 +232,6 @@ class BrainLiveReadyGuardrailService:
         return {"schema_version": "incident_memory_guardrail.v1", "available": bool(rows),
                 "event_count": len(rows), "events": rows}
 
-    def _release_rollback(self, readiness: dict[str, Any]) -> dict[str, Any]:
-        release = dict(readiness.get("release") or {})
-        latest = dict(release.get("latest_release") or {})
-        rollback_ref = dict(latest.get("rollback_ref") or {})
-        snapshot_hash = str(rollback_ref.get("snapshot_hash") or latest.get("runtime_config_hash") or "")
-        return {"schema_version": "release_rollback_guardrail.v1", "release_available": bool(release.get("ok")),
-                "run_id": str(latest.get("run_id") or ""), "release_status": str(latest.get("status") or ""),
-                "rollback_ref": rollback_ref, "snapshot_hash": snapshot_hash, "rollback_ready": bool(snapshot_hash)}
-
     def _p3_p4_evidence(self, readiness: dict[str, Any]) -> dict[str, Any]:
         v16 = dict(readiness.get("v16") or {})
         p3 = dict(v16.get("low_impact_executions") or readiness.get("brain_low_impact_executions") or {})
@@ -261,7 +245,7 @@ class BrainLiveReadyGuardrailService:
     @staticmethod
     def _recommendation(*, live_lock: dict[str, Any], divergence: dict[str, Any],
                         incident: dict[str, Any], incident_memory: dict[str, Any],
-                        release_rollback: dict[str, Any], p3_p4: dict[str, Any]) -> dict[str, Any]:
+                        p3_p4: dict[str, Any]) -> dict[str, Any]:
         reasons = list(live_lock.get("blockers") or [])
         if divergence.get("divergence_detected"):
             reasons.append("broker_local_divergence")
@@ -269,8 +253,6 @@ class BrainLiveReadyGuardrailService:
             reasons.append("missing_broker_divergence_evidence")
         if not incident_memory.get("available"):
             reasons.append("missing_incident_memory")
-        if not release_rollback.get("rollback_ready"):
-            reasons.append("missing_release_rollback_ref")
         if not p3_p4.get("p3_available"):
             reasons.append("missing_p3_execution_evidence")
         if not p3_p4.get("p4_available"):
@@ -278,7 +260,7 @@ class BrainLiveReadyGuardrailService:
         if live_lock.get("locked") and not reasons:
             target_mode = str(incident.get("mode") or "normal")
             action = "observe"
-        elif divergence.get("divergence_detected") or not release_rollback.get("rollback_ready"):
+        elif divergence.get("divergence_detected"):
             target_mode = "only_close"
             action = "tighten_to_only_close"
         elif "broker_not_connected" in reasons or "autonomy_posture_not_live_ready" in reasons:
@@ -337,15 +319,14 @@ class BrainLiveReadyGuardrailService:
         try:
             execute(conn, """INSERT INTO brain_live_ready_guardrail (guardrail_id, status,
                 live_capability_lock_json, broker_local_divergence_json, incident_control_json,
-                incident_memory_json, release_rollback_json, p3_p4_evidence_json,
+                incident_memory_json, p3_p4_evidence_json,
                 action_recommendation_json, risk_precheck_json, boundary_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(guardrail_id) DO UPDATE SET status=excluded.status,
                 live_capability_lock_json=excluded.live_capability_lock_json,
                 broker_local_divergence_json=excluded.broker_local_divergence_json,
                 incident_control_json=excluded.incident_control_json,
                 incident_memory_json=excluded.incident_memory_json,
-                release_rollback_json=excluded.release_rollback_json,
                 p3_p4_evidence_json=excluded.p3_p4_evidence_json,
                 action_recommendation_json=excluded.action_recommendation_json,
                 risk_precheck_json=excluded.risk_precheck_json, updated_at=excluded.updated_at""",
@@ -354,7 +335,6 @@ class BrainLiveReadyGuardrailService:
                  dumps(payload.get("broker_local_divergence") or {}),
                  dumps(payload.get("incident_control") or {}),
                  dumps(payload.get("incident_memory") or {}),
-                 dumps(payload.get("release_rollback") or {}),
                  dumps(payload.get("p3_p4_evidence") or {}),
                  dumps(payload.get("action_recommendation") or {}),
                  dumps(payload.get("risk_precheck") or {}),
@@ -372,7 +352,6 @@ class BrainLiveReadyGuardrailService:
                 "broker_local_divergence": loads(row["broker_local_divergence_json"], {}),
                 "incident_control": loads(row["incident_control_json"], {}),
                 "incident_memory": loads(row["incident_memory_json"], {}),
-                "release_rollback": loads(row["release_rollback_json"], {}),
                 "p3_p4_evidence": loads(row["p3_p4_evidence_json"], {}),
                 "action_recommendation": loads(row["action_recommendation_json"], {}),
                 "risk_precheck": loads(row["risk_precheck_json"], {}),

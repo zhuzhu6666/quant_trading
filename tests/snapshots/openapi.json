@@ -64,11 +64,6 @@
             "title": "Consume Recommended Step",
             "type": "boolean"
           },
-          "create_release_evidence": {
-            "default": true,
-            "title": "Create Release Evidence",
-            "type": "boolean"
-          },
           "effect_limit": {
             "default": 50,
             "title": "Effect Limit",
