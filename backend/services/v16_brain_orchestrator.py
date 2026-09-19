@@ -228,7 +228,7 @@ class V16BrainOrchestratorService:
         bridge_reconciliation = (
             BrainGovernanceCandidateService(self.db_path).reconcile_submitted_bridges()
             if persist
-            else {"reconciled_count": 0, "missing_bridge_count": 0}
+            else {"reconciled_count": 0, "missing_bridge_count": 0, "orphan_bridge_count": 0}
         )
         limit = max(4, min(int(limit or 20), 50))
         arbitration = load_posterior_arbitration(self.db_path)

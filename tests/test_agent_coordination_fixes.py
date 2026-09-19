@@ -267,6 +267,78 @@ def test_candidate_review_skips_unchanged_evidence_and_expires_legacy_rows(tmp_p
     assert candidates.latest_candidates(limit=10)["items"] == []
 
 
+def test_terminal_candidate_closes_only_its_own_unexecuted_bridge(tmp_path):
+    """A dead candidate must release the control surface; a live one must not.
+
+    The supervisor template lane deadlocked on this: an expired candidate left
+    its approved bridge suggestion open, the candidate review then reported
+    ``conflict_detected`` for every successor, so nothing could ever bridge
+    again while the orphan itself was unclaimable.
+    """
+    db_path = _db(tmp_path)
+    candidates = BrainGovernanceCandidateService(db_path)
+    now = time.time()
+    rows = (
+        ("candidate-orphan", "superseded", "bridge-orphan"),
+        ("candidate-live", "awaiting_execution", "bridge-live"),
+    )
+    for candidate_id, _status, _suggestion_id in rows:
+        candidates.create_candidate(
+            candidate_id=candidate_id,
+            source_agent="v16_brain",
+            source_kind="supervisor_template_governance",
+            source_ref_type="test",
+            source_ref_id="test",
+            proposal_stage="brain_candidate",
+            capability_scope="supervisor_template_governance",
+            scope_type="position_supervisor_template",
+            scope_key="position_supervisor:auto_overprotection_relief.d274126431.v1",
+            action="switch_position_supervisor_template",
+            confidence=0.8,
+            evidence_score=0.8,
+            risk_class="medium",
+            max_impact="medium",
+            evidence_refs={"posterior": "stable"},
+            now=now,
+        )
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executemany(
+            """INSERT INTO policy_suggestion
+               (suggestion_id, scope_type, scope_key, action, confidence, status,
+                governance_eligible, created_at)
+               VALUES (?, 'position_supervisor_template',
+                       'position_supervisor:auto_overprotection_relief.d274126431.v1',
+                       'switch_position_supervisor_template', 0.8, 'approved', 1, ?)""",
+            [("bridge-orphan", now), ("bridge-live", now)],
+        )
+        for candidate_id, status, suggestion_id in rows:
+            conn.execute(
+                "UPDATE brain_governance_candidate SET status=?, submitted_suggestion_id=?"
+                " WHERE candidate_id=?",
+                (status, suggestion_id, candidate_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = candidates.reconcile_submitted_bridges(now=now)
+
+    assert result["orphan_bridge_count"] == 1
+    conn = connect_sqlite(db_path)
+    try:
+        statuses = {
+            str(row[0]): str(row[1])
+            for row in conn.execute(
+                "SELECT suggestion_id, status FROM policy_suggestion"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert statuses["bridge-orphan"] == "superseded"
+    assert statuses["bridge-live"] == "approved"
+
+
 def test_proposal_registry_compacts_repeated_source_events_without_deleting_ledger(tmp_path):
     db_path = _db(tmp_path)
     ensure_proposal_registry_table(db_path)

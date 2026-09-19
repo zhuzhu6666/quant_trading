@@ -402,28 +402,33 @@ class BrainGovernanceCandidateService:
         now: float | None = None,
         limit: int = 1000,
     ) -> dict[str, Any]:
-        """Reconcile legacy submitted rows from the downstream suggestion state.
+        """Reconcile the candidate<->bridge suggestion pair in both directions.
 
         This is a service-backed repair projection for rows created before the
         explicit lifecycle.  It never activates a candidate: missing or
         terminal bridges are closed, while proposed/approved/applied bridges
-        are projected to the corresponding pending/terminal state.
+        are projected to the corresponding pending/terminal state.  A terminal
+        candidate that still owns an unexecuted suggestion is closed the other
+        way round, because such an orphan holds the control surface against its
+        successor candidate forever.
         """
         ensure_brain_governance_candidate_table(self.db_path)
         ensure_policy_suggestion_table(self.db_path)
         current = float(now if now is not None else time.time())
         conn = _connect(self.db_path)
         try:
+            terminal_statuses = "', '".join(sorted(CANDIDATE_TERMINAL_STATUSES))
             if not state_table_exists(conn, "policy_suggestion"):
                 return {
                     "ok": True,
                     "schema_version": "brain_governance_candidate_bridge_reconcile.v1",
                     "reconciled_count": 0,
                     "missing_bridge_count": 0,
+                    "orphan_bridge_count": 0,
                 }
             rows = _execute(
                 conn,
-                """SELECT candidate.candidate_id,
+                f"""SELECT candidate.candidate_id,
                           candidate.submitted_suggestion_id,
                           candidate.status,
                           suggestion.status AS suggestion_status,
@@ -432,14 +437,46 @@ class BrainGovernanceCandidateService:
                    LEFT JOIN policy_suggestion suggestion
                      ON suggestion.suggestion_id=candidate.submitted_suggestion_id
                    WHERE candidate.status IN ('bridge_pending', 'awaiting_execution', 'submitted')
+                      OR (
+                          candidate.status IN ('{terminal_statuses}')
+                          AND suggestion.status IN ('proposed', 'approved')
+                          AND COALESCE(suggestion.applied_mutation_id, '')=''
+                      )
                    ORDER BY candidate.updated_at ASC
                    LIMIT ?""",
                 (max(1, min(int(limit), 5000)),),
             ).fetchall()
             reconciled = 0
             missing = 0
+            orphans_closed = 0
             for row in rows:
                 suggestion_id = str(row["submitted_suggestion_id"] or "")
+                if (
+                    str(row["status"] or "") in CANDIDATE_TERMINAL_STATUSES
+                    and str(row["suggestion_status"] or "") in {"proposed", "approved"}
+                    and not str(row["applied_mutation_id"] or "")
+                ):
+                    # The candidate is out of the execution chain, so nothing can
+                    # ever apply its suggestion; leaving it open makes the review
+                    # conflict gate block the successor candidate for good
+                    # (2026-09-18: supervisor template lane deadlock).
+                    changed = _execute(
+                        conn,
+                        """UPDATE policy_suggestion
+                           SET status='superseded', reviewed_at=?, review_note=?
+                           WHERE suggestion_id=?
+                             AND status IN ('proposed', 'approved')
+                             AND COALESCE(applied_mutation_id, '')=''""",
+                        (
+                            current,
+                            f"superseded: owning candidate is {str(row['status'] or '')}",
+                            suggestion_id,
+                        ),
+                    )
+                    if int(getattr(changed, "rowcount", 0) or 0) == 1:
+                        orphans_closed += 1
+                        reconciled += 1
+                    continue
                 if not suggestion_id or not row["suggestion_status"]:
                     changed = _execute(
                         conn,
@@ -468,6 +505,7 @@ class BrainGovernanceCandidateService:
                 "schema_version": "brain_governance_candidate_bridge_reconcile.v1",
                 "reconciled_count": reconciled,
                 "missing_bridge_count": missing,
+                "orphan_bridge_count": orphans_closed,
             }
         finally:
             conn.close()
