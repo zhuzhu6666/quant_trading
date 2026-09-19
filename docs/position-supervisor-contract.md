@@ -88,12 +88,20 @@ PositionSupervisor.evaluate(position_context: dict[str, Any]) -> PositionSupervi
 - `direction`
 - `entry_price`
 - `current_price`
+- `current_price_state`
 - `volume`
 - `opened_at`
 - `unrealized_pnl`
+- `pnl_state`
 - `realized_pnl`
 - `stop_loss`
 - `take_profit`
+
+`current_price_state` 与 `pnl_state` 是 broker 发布的组件事实（唯一读取者
+`live_position_lifecycle.position_component_state`），必须由上下文构造器原样带入。
+监督器的全部数值分支（近止损、近止盈、盈利捕获、反射梯）都以显式 `known` 为前置，
+缺状态即 unknown 并 fail-closed；不得由 `current_price` / `unrealized_pnl` 的数值
+存在反推为 known。
 
 ### 3.3 `market`
 

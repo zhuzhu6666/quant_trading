@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Last verified: 2026-09-14 22:53（22:35 受控重启对齐新码 + 回放重取 A 级 + 发布登记完成，三开关全绿；恢复表首平仓验证通过转 resolved；此前：学习闭环销账、slow tick 销账、恢复表完整度列补写入者、反事实流解堵、post-fill 接线修复）
+> Last verified: 2026-09-19 11:45（11:37:33 CST 三服务受控重启加载 C 批：监督上下文透传 broker 组件状态 + hold 心跳腿退役，tick 1 即产出全历史第一条 `reflex_profit_lock` tighten（sl 4387.69→4380.22，amend success + reconcile confirmed）；上一轮 02:04:46 CST 重启加载 B1-末，01:04:44 CST 重启加载并验收 B3/B2/B1；待办：bar_replay 因本批判定改变需重取）
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -82,7 +82,7 @@ Deleted paths: 无删除（门重算、子动作重算不动：前者无手数�
 Targeted verification: tests/test_replay_release_evidence_contract.py 新增 2 例（分类器单测 + 接线级 wiring 测试，注入破坏后均失败）；回放/权重/学习 88 passed。修中自检出接线 bug（else 分支丢失致双计）一次，重取报告前已修复并由 wiring 测试锁住
 Migration/OpenAPI/build: 无变更
 Runtime verification: 重取报告 `bar_replay_43bcab2d43a14a70`（23.1s）grade **B**（分歧 0、input gap 22、覆盖 0.95、门 0 分歧）→ 准入 ok/fresh；learning worker 19:36 重启；11:42 UTC 周期 175.1s 结束，`rsi_14` 落账 applied（`gmut_e0b45ded26be4a5d833fac7b843cbf62`，1.0→0.89）
-Remaining compatibility: 真翻转（允许↔拒绝）、有手数下的门分歧照样记分歧；2 条无 verdict skip 仍只影响覆盖率
+Remaining compatibility: 真翻转（允许↔拒绝）、有手数下的门分歧照样记分歧；该批当时把"无 verdict 的 skip 只影响覆盖率"写进了口径，实际代码同时计入 mismatch（见 §2 2026-09-18 批的订正）
 Unresolved live evidence: 无（学习闭环 exit (a)(b) 全齐，条目已从旧债登记册移除）
 Next batch: 常态观察（selection 首个可治理候选、因子 exit (c)、恢复表首平仓验证）
 ```
@@ -125,6 +125,80 @@ Scoreboard baseline（30d/403笔，冻结对照）: 期望值/笔-0.94，PF 0.78
 Unresolved live evidence: 首条reflex_*真实动作日志+洗出率（24h观察）；MFE捕获率是否抬头；Phase3（第二意见/日内适应）视数据再定
 Next batch: 反射观察 + selection首个可治理候选 + 因子exit (c)
 ```
+
+**本批（2026-09-18 回放分级改用"RiskPolicy 未到达"显式权威 + entry-cluster denial reason 漏配；2026-09-19 01:04 CST 重启后验收）**：
+
+```text
+Batch: 回放分级不再用"缺 verdict"反推 RiskPolicy 未运行；补 entry-cluster 同向冷却这一 live-only denial reason
+Canonical authority: `review_contract.risk_policy_not_reached`（新增只读谓词；该事实由 `live_tick_pipeline.build_skip_ledger_payload` 以 `risk_stage=not_reached` + `risk_policy_reached=false` 写入，API 与 replay 共用同一判据）；分级唯一计算者仍是 `ReplayHarnessService._build_report` + `_p1_replay_grade`
+Deleted paths: `backend/api/risk.py._recent_policy_verdicts` 内联的三条 `skip_stage/risk_stage/risk_policy_reached` 反推检查（改调谓词，行为不变）；`_build_report` 中"无 verdict 即 row_issue"的单一分支（改为 pre-policy skip / 真空缺两分支）
+Targeted verification: tests/test_replay_release_evidence_contract.py 14 passed（新增 2 例：显式标记的 skip 既不 mismatch 也不进覆盖率分母且评级可到 A；缺标记的 skip 仍记 mismatch 并落 C —— 后者注入破坏即失败；`_is_live_state_only_denial` 增补 learning_same_direction_cooldown 断言）；phase0/risk api/fact views 合计 77 passed；`pytest -m smoke` 215 passed
+Migration/OpenAPI/build: 无 schema 变更；migration check ok（37/37，无 mismatch）；ASGI smoke 通过；`scripts/check_openapi_snapshot.py` 不在服务器 sparse checkout 内未跑（本次未改任何端点签名，只在 replay_report.metric_summary_json 内新增两个键）
+Runtime verification: **2026-09-19 01:04:44 CST（17:04 UTC）三服务受控重启已加载本批**（NRestarts=0，recovery bootstrap 确认券商无持仓，tick 从 1 重跑，无闩无 blocker）；同批重取回放 `bar_replay_d3dabc1e3b7345ee`（29.9s，lookback 7d/limit 80）grade **A**，`pre_policy_skip_count=20`、`risk_verdict_decision_count=60`、`risk_verdict_coverage=1.0`，`status()` → ok/fresh/blockers=[]（重启前该报告恒 C，20 条 skip 型 mismatch 全部消失）
+Remaining compatibility: 报告新增 `pre_policy_skip_count` / `risk_verdict_decision_count` 两键；历史 replay_report 行不回填；全为 pre-policy skip 时 verdict 覆盖率按 fail-closed 记 0（不升 A）
+Unresolved live evidence: 本批两条均已收口——① 回放重取达 A（见上）；② ≥0.10 权重通道恢复落账（重启后 17:24:39 UTC 两条 `factor_governance_update_weight` application 状态 applied，此前自 09-17 重启起 0 条）
+Next batch: canary 自振荡与 effect 积压终态化（现查 active effect 55 / 预算 24，`learning_experiment_admission.reserve_scope` 因此对任何单 scope 实验恒返回 blocked_global_experiment_budget —— 这是监督模板链上独立于 claim 的第二道闸）
+```
+
+**本批（2026-09-18 B2：实验预算积压终态化 + canary 晋升纳入同一预算；2026-09-19 01:04 CST 重启后验收）**：
+
+```text
+Batch: 观察窗时钟改用账本行 `created_at` 单一权威（恢复"24h 未成可比较 baseline 即收口 inconclusive"的既有合同）；因子激活 canary 实验纳入全局实验预算
+Canonical authority: 观察窗起点 = `RuleEvolutionGovernor._app_ts`（cycle_ts→`learning_application_log.created_at`），`research.learning.effect_reconciliation.evaluate_application_effect` 只接收该值（参数 `observation_start_ts`）不再自算；全局预算唯一计算者 `LearningExperimentAdmissionService.global_budget()/global_slot_available()`（新增，收口原 4 处重复读 env + pytest 例外）；分级语义仍由 `research.learning.application_effects.observation_window_expired`（纯分类器，参数随之改名）
+Deleted paths: `effect_reconciliation` 内两处 `app.get("cycle_ts")` 反推（生产 136 条 application 的 details_json 全部无该键 → 时钟恒判 invalid → 过期腿永不触发）；`reserve_batch` / `reserve_batch_in_transaction` / `reserve_scope` / `evaluate` 四处重复的预算解析与 pytest 例外块（`evaluate` 与 `reserve_scope` 由此获得原本只有 reserve_batch 才有的同一条例外，规则统一到一处）
+Targeted verification: 150 passed（research governor/application_effects/rule_learning_pipeline + learning_experiment_admission + learning_effect_quality + factor_governance_effect_tracker + 因子治理编排全家 + factor_lifecycle_service）+ 146 passed（weight_change/autonomous_learning/governance_runtime_controls/acceleration_flow/nursery_exploration_budget/proposal_registry/supervisor_templates/agent_scorecard/entry_quality）；新增 2 例并做注入破坏：① 生产形态行（无 details cycle_ts）旧测试判 observing 不收敛、新例判 inconclusive 且 `observation_clock_valid=true`、start_ts 与行时间一致；② 预算满时激活腿不产出 mutation 且审计落 `blocked_global_experiment_budget`（去掉门后 `activated` 多一项即失败）；`pytest -m smoke` 215 passed；`git diff --check` 干净
+Migration/OpenAPI/build: 无 schema 变更（migration 37/37 ok 未受影响）；无端点签名变更
+Runtime verification: **已加载**（2026-09-19 01:04:44 CST 三服务受控重启，与 B3/B1 同批）。首个周期（17:17 UTC nursery）实测：active 实验 **54 → 13**、`global_slot_available()` False→True，`causal_status=observation_window_expired_inconclusive` 计数从 **0 → 41**（重启前全表从未出现过该状态，证明过期腿在生产里从未触发过）；剩余 13 条 observing 行龄全部 <24h，即观察窗按合同回收。`blocked_global_experiment_budget` 不再恒发（17:04 后新增 0 条该理由事件），17:24:39 UTC 两条 `factor_governance_update_weight` application 落 applied
+Remaining compatibility: 历史 effect 行内已 stamped 的 `observation_window.start_ts=0` 不回填（读取侧只用新行）；`observation_window_expired` 参数改名不影响调用方（全 keyword-only，仅 1 处生产调用 + 2 处测试）；canary 激活被预算挡住时因子保留 `PROMOTION_PREPARED` 租约（168h）等下一周期，不做退役/隔离
+Unresolved live evidence: ① 已验：active 54→13 落到预算内，≥0.10 权重通道恢复落账（17:24 两条 applied）；② 仍待观察：canary 稳态占用实测值（当前 13，估算区间 12~24：约 0.9 次激活/小时 × 24h 观察窗，再扣约 28% 提前隔离 churn —— 21/74 激活的 effect 已 rolled_back）—— 若长期贴着 24 挤占预算，操作者可用既有旋钮（`QUANT_LEARNING_MAX_ACTIVE_EXPERIMENTS` / `factor_governance_max_promotions_per_cycle`）调节，本批不新增阈值
+Next batch: B1（V16 命令 authority 寿命 1800s vs 每小时领取；桥落在已被顶替的 candidate 代际上）—— 监督模板链三道闸的最后一道；随后一次性受控重启 + 回放重取验收 B3/B2/B1
+```
+
+**关于"canary 自振荡"的实测更正（本批只读定位，不改代码）**：旧口径「25.5h 内 50 promote / 12 rollback / 105 quarantine = 同一因子反复晋升」不成立。`promote_factor` 对同一因子合法地出现两次（SHADOW→`prepare_promotion` 与 PREPARED→`activate` 两条腿都记这个动作），dsl 全量 `generation` 均为 1（无代际反复）。真实抖动来自另一条腿：激活后 canary 投影在 OOS 判据（`canary_min_oos_pnl=0.0`，80 根）下不过 → 注册表投影落 `SHADOW/QUARANTINED` → `_rollback_failed_actions` 判 `persisted canary regression` 隔离 → 生命周期行跟随隔离并把该因子的 effect 立即终态化（rolled_back）。这部分属梯子判据（R3 因子轨），不是预算账本缺陷，本批不动。积压的 53 条**不是**被抖出来的，而是存活 canary 的观察窗永远不到期（时钟死腿）。
+
+**本批（2026-09-18 B1：终态候选遗留的孤儿桥建议把监督模板链锁死；2026-09-19 01:04 CST 重启后验收）**：
+
+```text
+Batch: 候选终态后闭合其未执行的 bridge 建议，释放同 control surface 的后继候选
+Canonical authority: `BrainGovernanceCandidateService.reconcile_submitted_bridges`（候选↔桥建议这一对的双向对账唯一写入者，唯一调用者 `V16BrainOrchestratorService.run_once`，`persist=True` 才写）；建议状态机本身不变（`policy_suggestion` 仍由桥接写入、由 apply 路径落 applied/rollback），候选状态仍只由 `sync_candidate_suggestion_lifecycle` 正向投影
+Deleted paths: 无删除（只把原查询遗漏的"候选终态 + 建议仍 open + 无 mutation"这一族纳入同一对账；未新增 reconciler、线程或调度器）
+Targeted verification: tests/test_agent_coordination_fixes.py 9 passed（新增 1 例同时锁两个方向：superseded 候选的 approved 桥建议被 supersede、`awaiting_execution` 候选的建议保持 approved；把判据短路后该例以 0 != 1 失败）；v16/governance/supervisor/pruning/registry/scorecard/ops-api 合计 104 passed；`pytest -m smoke` 215 passed
+Migration/OpenAPI/build: 无 schema 变更、无端点签名变更；`reconcile_submitted_bridges` 返回新增 `orphan_bridge_count` 一键（`run_once` 非 persist 分支同步补 0）
+Runtime verification: **已加载并验通首跳+桥接**（2026-09-19 01:04:44 CST 受控重启，与 B3/B2 同批）。重启前死锁实况：唯一 approved 桥建议 `brain_bridge_676cd401…`（09-17 13:20）的候选 `psv_7598badad8101059` 已于 09-18 13:20 因 24h TTL 被 `reconcile_expired_candidates` supersede，建议仍 approved 且 `applied_mutation_id=''`；当前 ACTIVE 候选 `psv_acb298d43854f933`（09-17 17:46，`min_thesis_break_seconds` 900→300 / transition_confirming）四次评审全部 `conflict_detected`（`bridge_ready=0`、`evidence_gaps=[]`，冲突项就是那条孤儿建议），而孤儿自身因候选终态不可 claim —— 双向死锁。17:17:xx UTC 首次 orchestrator 对账后逐项落地：孤儿建议 → `superseded`（note "superseded: owning candidate is superseded"）；后继候选评审 → **`bridge_ready=1`**（"supervisor template evidence ready"）；候选 → `awaiting_execution` 并写出新建议 `brain_bridge_332b34da…`（approved）；同时签发新命令 `v16cmd_8ede18e17f4c02a4ceef_rfbc623c9dc56`，状态 **`available`/`claim_attempts=0`** —— 本 lane 全历史 80 条命令此前**无一条**处于可用态（全部 cancelled）
+Remaining compatibility: 只闭合 `proposed/approved` 且无 mutation 的建议；`applied` 建议与已 finalize 链不动；历史 `supervisor_experiment_admission_blocked`/`candidate_not_active` 命令行保持终态审计（不复活）
+Unresolved live evidence: ① 已由 §2 末批（B1-末）接管：01:47 周期实测 claim **成功**并抵达 Coordinator，被事务内复验判 `v16_command_candidate_binding_invalid` 而 abort —— 桥孤儿死锁确已解除，断点后移到复验漏列；② `test_supervisor_hold_trace_is_deduplicated_by_decision_evidence` 在 HEAD 即为红（见旧债登记册），与本批无关
+Next batch: 见下方 B1-末（同一受控重启批）；随后按实测数据处置反射层与 hold 心跳（含上述红测）
+```
+
+**本批（2026-09-19 B1-末：`validate_claim_in_transaction` 漏选 `evidence_json`，真实候选链在 Coordinator 事务内必被误判绑定无效）**：
+
+```text
+Batch: 补齐事务内复验的命令列，使 review-bound 候选链可消费自己 claim 的命令
+Canonical authority: `V16CommandGate.validate_claim_in_transaction`（Coordinator 事务内复验的唯一执行者；绑定判据本身仍只由 `_candidate_binding_is_valid` 计算，claim 路径 :366 与复验路径 :536 共用同一函数，本批只补它读取的列）
+Deleted paths: 无删除（未新增校验、阈值或第二套复验；同时把 `observation_window_expired` 的参数改名回退，避免动 `tests/research/*` 冻结验收测试——时钟权威修复保持在 `governor`→`evaluate_application_effect` 的 `observation_start_ts` 传参上）
+Targeted verification: tests/test_v16_command_finalize.py 8 passed —— 新增 `test_candidate_bound_claim_survives_in_transaction_revalidation`（真实 candidate+review+suggestion+带 `governance.candidate_review.evidence_fingerprint` 的命令；把 SELECT 里的 `evidence_json` 去掉即复现为 `v16_command_candidate_binding_invalid`，与生产同一状态串）；tests/research/* 两个冻结文件已 `git checkout` 回 HEAD，frozen+entry/v16/agent-coordination/factor-governance 合计 107 passed；B2-1 观察钟回归从 `tests/research/test_rule_evolution_governor.py` 迁到 `tests/test_entry_quality_governance.py::test_ledger_row_created_at_is_the_observation_clock`（把传参改回 0.0 即复现"永不到期"，红→绿已验证）；`pytest -m smoke` 215 passed
+Migration/OpenAPI/build: 无 schema 变更，纯 SELECT 列补齐
+Runtime verification: **已加载（2026-09-19 02:04:46 CST 三服务受控重启，NRestarts=0，recovery bootstrap 确认券商无持仓，治理投影 attempted=100/current=100/degraded=0，指纹由 `4ea81bc5…` 变 `f701468c…`）**。重启前实测（01:42 CST 周期，352.3s）：`demo_autonomy_apply` 于 01:47:51 落 `supervisor_templates.items[].mutation.status=aborted`，`error=GovernanceMutationError: v16_command_candidate_binding_invalid`，`mutation_id=gmut_3666adad7004467095d8386efd3c0c6c`（intent 现查 `error_stage=transaction`），命令 release 回 `available` 后于 01:55 被清扫判 `candidate_not_active`。重启后第一轮（02:12 周期，02:17:39 落 `demo_autonomy_apply`）：该 lane 现无可用命令，apply 侧正确 fail-closed 为 `v16_command_required`（不是伪造消费），同候选链未产生新 application；02:18 `reconcile_expired_candidates` 把 24h TTL 已到期的候选 `psv_acb298d43854f933` 置 `superseded`，其仍 approved 的桥建议 `brain_bridge_332b34da…` 随即被本批 B1 反向腿写成 `superseded`（note "superseded: owning candidate is superseded"）——**同一判据在生产里第二次独立验通**。B2 侧同时可见预算排队生效：canary 激活恢复后 active 实验 13 → 15（`activate_factor_canary` 01:55:51），`global_slot_available()` 仍 True。
+Remaining compatibility: 无 candidate 行的合成专家命令仍走 `_candidate_binding_is_valid` 早退分支（`factor_governance_update_weight` 等权重通道历来如此），本批不改变其语义
+Unresolved live evidence: 首条 `position_supervisor_template` application + effect + rollback 痕迹。链路本身已无已知阻断，缺的是**一次新的授权**：需先有新的成熟监督复盘 → advisory 产出新 candidate → 评审 `bridge_ready=1` → 桥接 approved 建议 → V16 签发 `available` 命令（SSoT 规定旧命令 cancelled 后必须有新的 `bridge_ready` review 才允许新建），随后在 `12,42` 周期被 claim 并由本批修复后的复验放行。属数据依赖，不以 SQL 或人工改状态代为产出。
+Next batch: 观察该 lane 首条 application（含 effect/rollback 痕迹）；随后按实测数据处置反射层与 hold 心跳
+```
+
+**本批（2026-09-19 C：监督上下文的 broker 组件状态透传 + a8f3f0df hold 心跳退役）**：
+
+```text
+Batch: 把 broker 已发布的 current_price_state / pnl_state 带入 position supervisor 评估上下文，恢复 live 与 replay 的数值分支可达性；按裁定退役无产出的 hold 心跳腿
+Canonical authority: 组件状态生产者 `execution/ctrader_bridge.py`（spot/execution 事件写 price 状态、专用未实现盈亏 RPC 写 pnl 状态）→ 唯一读取者 `live_position_lifecycle.position_component_state` → 唯一带入点 `build_position_supervisor_context_payload`；判定仍只在 `position_supervisor._component_known`（缺状态 unknown，fail-closed 语义不变）；开仓时点 composite score 的唯一读取者收口为 `live_position_lifecycle.entry_score_for_position` + `live_service._position_entry_score`（与既有 `_max_abs_entry_score_for_positions` 同族）
+Deleted paths: a8f3f0df 的 hold 心跳腿整体删除（`SUPERVISION_HEARTBEAT_INTERVAL_SECONDS`、`_SUPERVISION_HEARTBEAT_LAST_TS`、`supervision_heartbeat_due`、hold 分支 `else` 的 `stage="heartbeat"` 写入）及其专用 cadence 测试 `tests/test_position_supervisor.py::test_supervision_heartbeat_cadence_rule`；`live_supervision_runtime` 内联的 `_pos_entry_scores` ad-hoc getattr 读取块；旧债登记册"hold 心跳去重合同红测"条目（退出条件已按"退役该腿"取用，追溯走 Git）。保留：hold 的 `stage="evaluated"` 首次去重 trace、safety plane / market_closed_pending / readiness / worker 四类同名心跳
+Targeted verification: 185 passed（test_live_position_lifecycle + test_position_supervisor）、83 passed（test_live_service_lifecycle，含原 HEAD 红测 `test_supervisor_hold_trace_is_deduplicated_by_decision_evidence` 转绿并补 `log_position_supervisor_evaluation` 假件与 bar 级单写断言）、74 passed（supervision actions / path metrics / safety planner / safety plane / candidate execution / shadow observation / binding）；两处上下文契约测试分别钉住 known 透传与"缺状态仍 unknown"
+独立审查: 监督 runtime 变更按钩子要求经独立审查后加载。审查纠正了一处本批定位错误：**replay 侧同样经这个 builder，所以它的 `"known"` 硬写此前也被丢弃**——live 与 replay 一直同步失效（不是此前记的"replay 能跑 live 不能"）；后果是本批同时改变 replay 判定，既有 bar_replay A 级证据必须重取后才可再用于治理
+Migration/OpenAPI/build: 无 schema 变更、无端点签名变更；trace `context.position` 增加两个来源明确的只读字段（合同 §3.2 已同步）
+Runtime verification: **已加载并当场产出首条反射动作**（2026-09-19 11:37:33 CST 三服务受控重启，NRestarts=0；治理投影 attempted=100/current=100/degraded=0；`recovery bootstrap attached 1 live positions after restart`——周末持有的空单 290571145 被重新对账找回，未丢仓）。tick 1 即执行 `supervisor tighten pos=290571145 sl->4380.22`（原 SL 4387.69），canonical trace：`stage=executed action=tighten summary_reason=reflex_profit_lock`、evidence `current_price_component_state=known / pnl_component_state=known / reflex_window_ready=True`、mfe 10.47、current_pnl 4.38、giveback 0.5817 ≥ lock 档 0.55、`execution_class=applied`、`is_real_execution=True`。**这是全历史第一条 `reflex_*` 动作**（此前 619 条 trace 恒 0）。对照同一位置重启前形态：`price/pnl state=unknown`、`reflex_window_ready=False`，只可能由 regime_shift/thesis_broken 触发。启动瞬间一条 `startup safety fail-closed: broker_position_price_unknown` 属启动预热（spot 未到）常规路径，tick 1 后即放行；`degraded/0.90/errors=1/closed_pending_positions + account_blockers=none` 在重启前 11:32–11:34 同样存在，是"闭市持仓"既有姿态，非本批引入。
+Remaining compatibility: 不修 Safety 侧三处平行组件状态读取者（`live_safety_planner.py:41-47`、`live_loop_v2.py:44-56`、`live_supervision_runtime.py:1349-1366`），已单独登记为 monitoring 旧债
+Unresolved live evidence: ① 已闭合：首条 `reflex_*` 动作已在加载后 tick 1 落地（见上），RiskPolicy `risk_reducing_action` 放行、`amend_position_sltp_success` + `reconcile_confirmed` 连续；② 该 reflex 动作未带 TP extension amend（`target_take_profit_changed=false`），向外放宽路径仍未在 live 出现过，继续观察；③ 冻结验收窗口的 bar_replay 重取分级（本批使 replay 判定改变，旧 A 级证据在重取前不得复用）；④ 监督模板 lane 首条 application（承接 B1-末，属数据依赖）；⑤ 新暴露：已确认的 SL amend 不回写 `recovery_position_state.recovery_meta_json.sl`，见旧债登记册同名单元
+Next batch: 按重放与首条 reflex 动作的实际结果决定反射梯阈值是否进入治理候选；组件状态读取者收口批
+```
+
 
 ## 3. 未完成 / 待复核证据
 
