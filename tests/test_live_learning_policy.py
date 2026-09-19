@@ -43,7 +43,7 @@ def _row(scope_key, *, evidence=None):
 
 
 def test_entry_cluster_projection_preserves_committed_authority_and_threshold():
-    runtime, calls = _runtime([_row("xauusd:long_ge_3")])
+    runtime, calls = _runtime([_row("same_direction_ge_3")])
 
     result = load_active_learning_policy(
         "entry_cluster",
@@ -91,7 +91,7 @@ def test_entry_quality_and_event_window_have_endpoint_specific_projection():
 
 def test_policy_cache_returns_deep_copy_without_second_state_read():
     cache = {}
-    runtime, calls = _runtime([_row("xauusd:long_ge_1")], cache=cache)
+    runtime, calls = _runtime([_row("same_direction_ge_1")], cache=cache)
     first = load_active_learning_policy(
         "entry_cluster",
         runtime=runtime,
