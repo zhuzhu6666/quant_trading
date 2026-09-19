@@ -2889,6 +2889,15 @@ class FactorGovernanceOrchestrator:
                 str(item.get("factor_id") or ""),
             )
         )
+        # Activating a factor opens its canary effect window, which is a real
+        # experiment and therefore queues on the same global slot pool the
+        # weight, entry and supervisor lanes use.  It used to be written
+        # without asking that owner at all (2026-09-18: 53 observing canaries
+        # against a budget of 24), which both overshot the cap and starved
+        # every other lane with the backlog.
+        experiment_slot_available = LearningExperimentAdmissionService(
+            str(self.overlay.db_path)
+        ).global_slot_available()
         for item in candidates:
             if len(actions) >= max_actions:
                 break
@@ -2955,6 +2964,28 @@ class FactorGovernanceOrchestrator:
                     FactorLifecycleStage.PROMOTION_PREPARED.value,
                     FactorLifecycleStage.ACTIVE.value,
                 }:
+                    if not experiment_slot_available:
+                        # Stable code from the admission owner; the factor keeps
+                        # its prepared lease and re-tries next cycle.
+                        result = {
+                            "ok": False,
+                            "status": "blocked_global_experiment_budget",
+                            "lifecycle_stage": stage,
+                        }
+                        status = "blocked_by_evidence"
+                        actions.append(self._audit_action(
+                            run,
+                            item,
+                            "promote_factor",
+                            status,
+                            {**evidence, "experiment_budget": "active_effect_backlog_must_terminalize"},
+                            verdict,
+                            before={"lifecycle_stage": stage},
+                            after={"lifecycle_stage": stage},
+                            rollback={"target_stage": FactorLifecycleStage.QUARANTINED.value},
+                            result=result,
+                        ))
+                        continue
                     target_weight = float(
                         getattr(cfg, "factor_governance_new_factor_weight", 0.0) or 0.0
                     )

@@ -67,6 +67,7 @@ class EffectEvaluation:
 def evaluate_application_effect(
     *,
     app: dict[str, Any],
+    observation_start_ts: float,
     scope_type: str,
     scope_key: str,
     post_reviews: list[dict[str, Any]],
@@ -91,6 +92,9 @@ def evaluate_application_effect(
     max_observation_age_seconds: float,
     now: float,
 ) -> EffectEvaluation:
+    # ``observation_start_ts`` is the same boundary the reviews were sliced
+    # with, so the stamped window and the expiry clock cannot disagree.
+    observation_start_ts = float(observation_start_ts or 0.0)
     post_reviews = post_reviews[: int(observe_trades)]
     baseline_reviews = baseline_reviews[: int(observe_trades)]
     post_rewards = [reward_from_review(item) for item in post_reviews]
@@ -129,7 +133,7 @@ def evaluate_application_effect(
             "excluded_regime_mismatch_baseline": excluded_regime_mismatch_baseline,
             "concurrent_applications": [next_application] if next_application else [],
             "observation_window": {
-                "start_ts": float(app.get("cycle_ts") or 0.0),
+                "start_ts": observation_start_ts,
                 "end_ts": observation_upper_bound if next_application else None,
                 "closed_by_application_id": str((next_application or {}).get("application_id") or ""),
             },
@@ -149,9 +153,10 @@ def evaluate_application_effect(
     decision["evidence_quality"]["causal_status"] = classification.causal_status
     if classification.retry_via_new_application:
         decision["evidence_quality"]["retry_via_new_application"] = True
-    cycle_ts = float(app.get("cycle_ts") or 0.0)
-    observation_clock_valid = cycle_ts >= 946684800.0
-    observation_age_seconds = max(0.0, now - cycle_ts) if observation_clock_valid else 0.0
+    observation_clock_valid = observation_start_ts >= 946684800.0
+    observation_age_seconds = (
+        max(0.0, now - observation_start_ts) if observation_clock_valid else 0.0
+    )
     decision["evidence_quality"]["observation_age_seconds"] = observation_age_seconds
     decision["evidence_quality"]["observation_clock_valid"] = observation_clock_valid
     decision["evidence_quality"]["max_observation_age_seconds"] = max(86400.0, float(max_observation_age_seconds or 0.0))
@@ -185,7 +190,10 @@ def evaluate_application_effect(
             decision["evidence_quality"]["retry_via_new_application"] = True
     if observation_window_expired(
         status=status,
-        cycle_ts=cycle_ts,
+        # ``cycle_ts`` is this classifier's legacy keyword for the observation
+        # window start (pinned by a frozen acceptance test); the value passed
+        # here must stay ``observation_start_ts``, not a cycle timestamp.
+        cycle_ts=observation_start_ts,
         now=now,
         max_age_seconds=float(max_observation_age_seconds or 0.0),
     ):

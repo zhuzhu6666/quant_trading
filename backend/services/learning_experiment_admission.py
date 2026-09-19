@@ -189,6 +189,41 @@ class LearningExperimentAdmissionService:
         active_ids.discard("")
         return active_ids, active_scopes
 
+    def global_budget(
+        self, max_global_active_experiments: int | None = None
+    ) -> int:
+        """The one global active-experiment cap every admission path shares.
+
+        An explicit override is honoured only when the caller's typed plan
+        carries one; otherwise the deployment environment owns the number.
+        """
+        try:
+            budget = max(
+                1,
+                int(
+                    max_global_active_experiments
+                    if max_global_active_experiments is not None
+                    else os.getenv("QUANT_LEARNING_MAX_ACTIVE_EXPERIMENTS", "24")
+                ),
+            )
+        except Exception:
+            budget = 24
+        # Some legacy integration tests intentionally exercise the production
+        # PostgreSQL path with an explicit opt-in.  Their fixture must not be
+        # rejected by unrelated live effect backlog; normal pytest runs and
+        # every non-test runtime keep the real 24-slot budget.
+        if (
+            is_state_db_path(self.db_path)
+            and os.getenv("PYTEST_CURRENT_TEST")
+            and os.getenv("QUANT_ALLOW_PYTEST_STATE_OVERLAY_WRITE", "").strip() == "1"
+        ):
+            budget = max(budget, 1_000_000)
+        return budget
+
+    def global_slot_available(self) -> bool:
+        """Cheap verdict for producers that queue on the same pool."""
+        return self.global_active_count() < self.global_budget()
+
     def global_active_count(self) -> int:
         """Count unique non-terminal experiments across application/effect ledgers."""
         active_ids, _ = self._store_active_ids_and_scopes()
@@ -230,27 +265,7 @@ class LearningExperimentAdmissionService:
         as their prepared application exists and expire safely after a crash.
         """
         self._ensure_reservation_table()
-        try:
-            budget = max(
-                1,
-                int(
-                    max_global_active_experiments
-                    if max_global_active_experiments is not None
-                    else os.getenv("QUANT_LEARNING_MAX_ACTIVE_EXPERIMENTS", "24")
-                ),
-            )
-        except Exception:
-            budget = 24
-        # Some legacy integration tests intentionally exercise the production
-        # PostgreSQL path with an explicit opt-in.  Their fixture must not be
-        # rejected by unrelated live effect backlog; normal pytest runs and
-        # every non-test runtime keep the real 24-slot budget.
-        if (
-            is_state_db_path(self.db_path)
-            and os.getenv("PYTEST_CURRENT_TEST")
-            and os.getenv("QUANT_ALLOW_PYTEST_STATE_OVERLAY_WRITE", "").strip() == "1"
-        ):
-            budget = max(budget, 1_000_000)
+        budget = self.global_budget(max_global_active_experiments)
         now = time.time()
         expires_at = now + max(30.0, float(reservation_ttl_seconds or 300.0))
         conn = get_state_pg_conn() if is_state_db_path(self.db_path) else connect_sqlite(self.db_path)
@@ -369,23 +384,7 @@ class LearningExperimentAdmissionService:
         cannot become visible before the runtime overlay, snapshot,
         application, and effect facts are ready to commit together.
         """
-        try:
-            budget = max(
-                1,
-                int(
-                    max_global_active_experiments
-                    if max_global_active_experiments is not None
-                    else os.getenv("QUANT_LEARNING_MAX_ACTIVE_EXPERIMENTS", "24")
-                ),
-            )
-        except Exception:
-            budget = 24
-        if (
-            is_state_db_path(self.db_path)
-            and os.getenv("PYTEST_CURRENT_TEST")
-            and os.getenv("QUANT_ALLOW_PYTEST_STATE_OVERLAY_WRITE", "").strip() == "1"
-        ):
-            budget = max(budget, 1_000_000)
+        budget = self.global_budget(max_global_active_experiments)
 
         names = sorted(str(name) for name in candidates)
         resolved_reservation_ids = {
@@ -542,17 +541,7 @@ class LearningExperimentAdmissionService:
         they must participate in the exact same atomic budget and scope lock.
         """
         self._ensure_reservation_table()
-        try:
-            budget = max(
-                1,
-                int(
-                    max_global_active_experiments
-                    if max_global_active_experiments is not None
-                    else os.getenv("QUANT_LEARNING_MAX_ACTIVE_EXPERIMENTS", "24")
-                ),
-            )
-        except Exception:
-            budget = 24
+        budget = self.global_budget(max_global_active_experiments)
         now = time.time()
         expires_at = now + max(30.0, float(reservation_ttl_seconds or 300.0))
         conn = get_state_pg_conn() if is_state_db_path(self.db_path) else connect_sqlite(self.db_path)
@@ -704,20 +693,16 @@ class LearningExperimentAdmissionService:
                 "boundary": self.boundary(),
             }
         if not bypass_for_risk_reduction:
-            if max_global_active_experiments is None:
-                try:
-                    max_global_active_experiments = max(1, int(os.getenv("QUANT_LEARNING_MAX_ACTIVE_EXPERIMENTS", "24")))
-                except Exception:
-                    max_global_active_experiments = 24
+            budget = self.global_budget(max_global_active_experiments)
             global_active = self.global_active_count()
-            if global_active >= max_global_active_experiments:
+            if global_active >= budget:
                 return {
                     "ok": True,
                     "allowed": False,
                     "status": "blocked_global_experiment_budget",
                     "reason": "active_effect_backlog_must_terminalize",
                     "global_active_count": global_active,
-                    "global_active_budget": max_global_active_experiments,
+                    "global_active_budget": budget,
                     "boundary": self.boundary(),
                 }
         delta = None

@@ -303,3 +303,53 @@ def test_v2_control_atomically_replaces_applied_v1_control(tmp_path, monkeypatch
     }
     assert json.loads(intent[0])["min_abs_signal_score"] == 0.6389
     assert json.loads(intent[1])["min_abs_signal_score"] == 0.40
+
+
+def test_ledger_row_created_at_is_the_observation_clock(tmp_path):
+    """Production application rows carry no details ``cycle_ts`` key.
+
+    The activation-canary writer (and every coordinator application) records the
+    window start only as the ``created_at`` column; reading a details key
+    instead left 53 canary windows ``observing`` forever, which exhausted the
+    global experiment budget for every other governed lane.
+    """
+    from backend.core.db import STATE_DB_DDL
+    from backend.services.learning_application_store import LearningApplicationStore
+
+    db_path = tmp_path / "observation-clock.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+    store = LearningApplicationStore(str(db_path))
+    started_at = time.time() - 3 * 86400.0
+    app_id = store.prepare_application(
+        scope_type="factor",
+        scope_key="dsl_auto_canary_factor",
+        action="activate_factor_canary",
+        status="applied",
+        source="factor_lifecycle.activate",
+        cycle_ts=started_at,
+    )
+    store.write_effect(
+        application_id=app_id,
+        scope_type="factor",
+        scope_key="dsl_auto_canary_factor",
+        action="activate_factor_canary",
+        status="observing",
+    )
+
+    RuleEvolutionGovernor(str(db_path)).reconcile_application_effects(
+        max_observation_age_seconds=86400.0,
+    )
+
+    effect = LearningApplicationStore(str(db_path)).latest_effect(
+        scope_key="dsl_auto_canary_factor", scope_type="factor"
+    )
+    quality = (effect or {}).get("decision", {}).get("evidence_quality") or {}
+    assert (effect or {}).get("status") == "inconclusive"
+    assert quality.get("causal_status") == "observation_window_expired_inconclusive"
+    assert quality.get("observation_clock_valid") is True
+    assert round(quality.get("observation_window", {}).get("start_ts") or 0.0) == round(started_at)

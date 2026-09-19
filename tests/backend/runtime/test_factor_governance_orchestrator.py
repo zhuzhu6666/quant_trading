@@ -311,12 +311,18 @@ def test_orchestrator_activates_only_prepared_factor_with_explicit_weight(monkey
         "_factor_admission_evidence_counts",
         _mature_clean_counts,
     )
+    audited_actions: list[dict] = []
     monkeypatch.setattr(
         orch,
         "_audit_action",
-        lambda _run, item, action, status, *_args, **_kwargs: {
-            "factor_id": item["factor_id"], "action": action, "status": status
-        },
+        lambda _run, item, action, status, *_args, **_kwargs: audited_actions.append(
+            {
+                "factor_id": item["factor_id"],
+                "action": action,
+                "status": status,
+                "result": _kwargs.get("result"),
+            }
+        ) or audited_actions[-1],
     )
 
     catalog = [_with_candidate_admission({
@@ -360,6 +366,26 @@ def test_orchestrator_activates_only_prepared_factor_with_explicit_weight(monkey
     )
     assert activated[0]["v16"].command_id == "v16-command-1"
     assert activated[0]["v16"].evidence_fingerprint == "evidence-1"
+
+    # Activation opens the canary effect window, so it queues on the same global
+    # experiment budget the weight/entry/supervisor lanes use (2026-09-18: it
+    # used to write applications without asking, overshooting 53 vs 24).
+    monkeypatch.setattr(
+        governance_module.LearningExperimentAdmissionService,
+        "global_slot_available",
+        lambda _self: False,
+    )
+    activated.clear()
+    audited_actions.clear()
+
+    actions = orch._promote_shadow_candidates(
+        catalog,
+        {"run_id": "activation-run"},
+        v16_authority={"command_id": "v16-command-1"},
+    )
+
+    assert activated == []
+    assert actions[0]["result"]["status"] == "blocked_global_experiment_budget"
 
 
 def test_orchestrator_does_not_promote_shadow_without_evidence():

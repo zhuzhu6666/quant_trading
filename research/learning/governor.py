@@ -1446,6 +1446,7 @@ class RuleEvolutionGovernor:
                 )
                 evaluation = evaluate_application_effect(
                     app=app,
+                    observation_start_ts=current_cycle_ts,
                     scope_type=scope_type,
                     scope_key=scope_key_for_effect,
                     post_reviews=post_reviews,
