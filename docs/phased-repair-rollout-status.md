@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Last verified: 2026-09-19 11:45（11:37:33 CST 三服务受控重启加载 C 批：监督上下文透传 broker 组件状态 + hold 心跳腿退役，tick 1 即产出全历史第一条 `reflex_profit_lock` tighten（sl 4387.69→4380.22，amend success + reconcile confirmed）；上一轮 02:04:46 CST 重启加载 B1-末，01:04:44 CST 重启加载并验收 B3/B2/B1；待办：bar_replay 因本批判定改变需重取）
+> Last verified: 2026-09-19 12:58（全量回归 3003 passed / 11 skipped，B3/B2/B1/B1-末/C 五批已按域拆成 7 个提交落在 `main`；12:55:03 CST 重取 C 批后的 bar_replay `bar_replay_51bd8c952ccb439d` grade **A**、`status()` 回到 ok/fresh/blockers=[]；此前 11:37:33 CST 三服务受控重启加载 C 批，tick 1 即产出全历史第一条 `reflex_profit_lock` tighten（sl 4387.69→4380.22，amend success + reconcile confirmed）；上一轮 02:04:46 CST 重启加载 B1-末，01:04:44 CST 重启加载并验收 B3/B2/B1）
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -195,7 +195,8 @@ Targeted verification: 185 passed（test_live_position_lifecycle + test_position
 Migration/OpenAPI/build: 无 schema 变更、无端点签名变更；trace `context.position` 增加两个来源明确的只读字段（合同 §3.2 已同步）
 Runtime verification: **已加载并当场产出首条反射动作**（2026-09-19 11:37:33 CST 三服务受控重启，NRestarts=0；治理投影 attempted=100/current=100/degraded=0；`recovery bootstrap attached 1 live positions after restart`——周末持有的空单 290571145 被重新对账找回，未丢仓）。tick 1 即执行 `supervisor tighten pos=290571145 sl->4380.22`（原 SL 4387.69），canonical trace：`stage=executed action=tighten summary_reason=reflex_profit_lock`、evidence `current_price_component_state=known / pnl_component_state=known / reflex_window_ready=True`、mfe 10.47、current_pnl 4.38、giveback 0.5817 ≥ lock 档 0.55、`execution_class=applied`、`is_real_execution=True`。**这是全历史第一条 `reflex_*` 动作**（此前 619 条 trace 恒 0）。对照同一位置重启前形态：`price/pnl state=unknown`、`reflex_window_ready=False`，只可能由 regime_shift/thesis_broken 触发。启动瞬间一条 `startup safety fail-closed: broker_position_price_unknown` 属启动预热（spot 未到）常规路径，tick 1 后即放行；`degraded/0.90/errors=1/closed_pending_positions + account_blockers=none` 在重启前 11:32–11:34 同样存在，是"闭市持仓"既有姿态，非本批引入。
 Remaining compatibility: 不修 Safety 侧三处平行组件状态读取者（`live_safety_planner.py:41-47`、`live_loop_v2.py:44-56`、`live_supervision_runtime.py:1349-1366`），已单独登记为 monitoring 旧债
-Unresolved live evidence: ① 已闭合：首条 `reflex_*` 动作已在加载后 tick 1 落地（见上），RiskPolicy `risk_reducing_action` 放行、`amend_position_sltp_success` + `reconcile_confirmed` 连续；② 该 reflex 动作未带 TP extension amend（`target_take_profit_changed=false`），向外放宽路径仍未在 live 出现过，继续观察；③ 冻结验收窗口的 bar_replay 重取分级（本批使 replay 判定改变，旧 A 级证据在重取前不得复用）；④ 监督模板 lane 首条 application（承接 B1-末，属数据依赖）；⑤ 新暴露：已确认的 SL amend 不回写 `recovery_position_state.recovery_meta_json.sl`，见旧债登记册同名单元
+Unresolved live evidence: ① 已闭合：首条 `reflex_*` 动作已在加载后 tick 1 落地（见上），RiskPolicy `risk_reducing_action` 放行、`amend_position_sltp_success` + `reconcile_confirmed` 连续；② 该 reflex 动作未带 TP extension amend（`target_take_profit_changed=false`），向外放宽路径仍未在 live 出现过，继续观察；③ 监督模板 lane 首条 application（承接 B1-末，属数据依赖；当前该 lane 无 ACTIVE 候选，等下一条候选证据链）；④ 新暴露：已确认的 SL amend 不回写 `recovery_position_state.recovery_meta_json.sl`，见旧债登记册同名单元
+回放重取: 本批改变 replay 判定后已重取 `bar_replay_51bd8c952ccb439d`（12:55:03 CST，lookback 7d/limit 80）grade **A**：80 决策 80 对齐、mismatch 6、`pre_policy_skip_count=20`、`risk_verdict_decision_count=60`、`risk_verdict_coverage=1.0`、`risk_verdict_disagreement_count=0`、gate/factor coverage 1.0，代码绑定 `784f9755…`。重取前 `status()` 因重启后代码绑定改变而 `degraded`（旧 A 级报告 `45e1c068…` 已按合同不可复用），重取后回放证据恢复可用；闭市期 nursery 在 `run_pending_governance` 早退，不会自行触发该重取
 Next batch: 按重放与首条 reflex 动作的实际结果决定反射梯阈值是否进入治理候选；组件状态读取者收口批
 ```
 
