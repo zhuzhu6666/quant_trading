@@ -346,6 +346,27 @@ def max_abs_entry_score_for_positions(
     return abs(float(max_entry))
 
 
+def entry_score_for_position(
+    position: Any,
+    *,
+    entry_scores: dict[int, float],
+) -> float:
+    """The composite score recorded at open time for this position."""
+
+    if hasattr(position, "get"):
+        pid = position.get("position_id") or position.get("ticket")
+    else:
+        pid = getattr(position, "position_id", None) or getattr(
+            position, "ticket", None
+        )
+    if pid is None:
+        return 0.0
+    try:
+        return float(entry_scores.get(int(pid)) or 0.0)
+    except Exception:
+        return 0.0
+
+
 def same_symbol_position(symbol: str, pos: Any, *, default_symbol: str | None = None) -> bool:
     wanted = str(symbol or default_symbol or "XAUUSD").replace("+", "").upper()
     actual = str(payload_get(pos, "symbol", "") or payload_get(pos, "symbol_name", "") or wanted)
@@ -2354,9 +2375,15 @@ def build_position_supervisor_context_payload(
                 position.get("entry_price", position.get("open_price", position.get("price_open", 0.0))) or 0.0
             ),
             "current_price": current_price,
+            # The supervisor fail-closes every numeric branch unless the broker
+            # published the component state explicitly; dropping these keys here
+            # silently disabled profit protection and the giveback reflex ladder
+            # for live and replay alike, since both build this same payload.
+            "current_price_state": position_component_state(position, "price"),
             "volume": float(position.get("volume", position.get("api_volume", 0.0)) or 0.0),
             "opened_at": float(position.get("open_time", 0.0) or 0.0),
             "unrealized_pnl": float(position.get("profit", position.get("pnl", 0.0)) or 0.0),
+            "pnl_state": position_component_state(position, "pnl"),
             "realized_pnl": 0.0,
             "stop_loss": stop_loss,
             "take_profit": take_profit,

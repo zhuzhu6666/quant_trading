@@ -13,18 +13,6 @@ from dataclasses import dataclass
 from typing import Any
 
 
-# Heartbeat cadence for unchanged hold verdicts: a supervised position must
-# leave a periodic "still watched" trace even when its conclusion never
-# changes (the noop fingerprint path below would otherwise stay silent).
-SUPERVISION_HEARTBEAT_INTERVAL_SECONDS = 900.0
-_SUPERVISION_HEARTBEAT_LAST_TS: dict[int, float] = {}
-
-
-def supervision_heartbeat_due(*, last_ts: float, now_ts: float) -> bool:
-    """Cadence rule for hold heartbeats (pure: safe to unit-test)."""
-    return bool(float(now_ts or 0.0) - max(0.0, float(last_ts or 0.0)) >= SUPERVISION_HEARTBEAT_INTERVAL_SECONDS)
-
-
 @dataclass(frozen=True)
 class LiveSupervisionRuntime:
     logger: Any
@@ -587,21 +575,6 @@ def run_position_supervision(
                     fingerprint=hold_fingerprint,
                     reason="hold_evaluated",
                 )
-            else:
-                _now_ts = time.time()
-                _last_heartbeat = _SUPERVISION_HEARTBEAT_LAST_TS.get(int(position_id), 0.0)
-                if supervision_heartbeat_due(last_ts=_last_heartbeat, now_ts=_now_ts):
-                    _SUPERVISION_HEARTBEAT_LAST_TS[int(position_id)] = _now_ts
-                    runtime.log_trace(
-                        position=position,
-                        verdict=verdict,
-                        cfg=cfg,
-                        tick=tick,
-                        stage="heartbeat",
-                        outcome="hold",
-                        execution_status="not_required",
-                        acct=account,
-                    )
             continue
 
         controls = dict(verdict.get("recommended_controls") or {})
@@ -1781,16 +1754,6 @@ def build_position_supervisor_context(
         position=position,
         position_metrics=position_metrics,
     )
-    try:
-        _score_book = getattr(_live_service(), "_pos_entry_scores", None) or {}
-        _entry_score = float(
-            _score_book.get(
-                int(position.get("position_id") or position.get("ticket") or 0)
-            )
-            or 0.0
-        )
-    except Exception:
-        _entry_score = 0.0
     context_inputs = _lifecycle_build_position_supervisor_context_inputs(
         position=position,
         cfg=cfg,
@@ -1812,7 +1775,7 @@ def build_position_supervisor_context(
         **context_inputs,
         temporal_context=temporal_context,
         position_metrics=position_metrics,
-        entry_score=_entry_score,
+        entry_score=_live_service()._position_entry_score(position),
     )
 
 

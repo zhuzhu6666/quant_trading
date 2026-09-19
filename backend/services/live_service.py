@@ -321,6 +321,7 @@ from backend.services.live_position_lifecycle import (
     remember_pending_open_attach as _lifecycle_remember_pending_open_attach,
     recovery_active_position_ids as _lifecycle_recovery_active_position_ids,
     max_abs_entry_score_for_positions as _lifecycle_max_abs_entry_score_for_positions,
+    entry_score_for_position as _lifecycle_entry_score_for_position,
     restore_attribution_for_positions as _lifecycle_restore_attribution_for_positions,
     same_symbol_position as _lifecycle_same_symbol_position,
     side_name as _lifecycle_side_name,
@@ -590,6 +591,13 @@ def _tracked_total_api_volume(positions: list[Any]) -> float:
 def _max_abs_entry_score_for_positions(positions: list[Any]) -> float:
     return _lifecycle_max_abs_entry_score_for_positions(
         positions,
+        entry_scores=_pos_entry_scores,
+    )
+
+
+def _position_entry_score(position: Any) -> float:
+    return _lifecycle_entry_score_for_position(
+        position,
         entry_scores=_pos_entry_scores,
     )
 

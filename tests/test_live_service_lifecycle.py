@@ -3269,12 +3269,18 @@ def test_supervisor_tighten_noop_is_deduplicated_before_risk_policy(monkeypatch)
 
 def test_supervisor_hold_trace_is_deduplicated_by_decision_evidence(monkeypatch):
     traces = []
+    evaluations = []
     remembered = set()
+    live_service._supervisor_evaluation_bars.pop(708, None)
 
     class _Ledger:
         def log_position_supervisor_trace(self, **kwargs):
             traces.append(kwargs)
             return "trace_hold"
+
+        def log_position_supervisor_evaluation(self, **kwargs):
+            evaluations.append(kwargs)
+            return "eval_hold"
 
         def log_decision(self, **_kwargs):
             raise AssertionError("hold must not enter the decision ledger")
@@ -3340,6 +3346,7 @@ def test_supervisor_hold_trace_is_deduplicated_by_decision_evidence(monkeypatch)
     assert traces[0]["stage"] == "evaluated"
     assert traces[0]["outcome"] == "hold"
     assert traces[0]["execution_status"] == "not_required"
+    assert [str(item["position_id"]) for item in evaluations] == ["708"]
 
 
 def test_demo_adaptive_supervisor_action_uses_governed_execution_chain(monkeypatch):

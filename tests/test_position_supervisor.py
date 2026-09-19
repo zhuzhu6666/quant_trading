@@ -981,9 +981,3 @@ def test_weak_entry_leash_tightens_earlier():
     strong = evaluate_position_supervisor(_leash_context(entry_score=0.80))
     assert strong["recommended_action"] == "hold"
     assert strong["evidence"]["weak_entry_leash"] is False
-
-
-def test_supervision_heartbeat_cadence_rule():
-    from backend.services.live_supervision_runtime import supervision_heartbeat_due
-    assert supervision_heartbeat_due(last_ts=0.0, now_ts=1000.0) is True
-    assert supervision_heartbeat_due(last_ts=500.0, now_ts=1000.0) is False

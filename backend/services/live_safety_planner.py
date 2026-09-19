@@ -504,6 +504,7 @@ def live_safety_planner_runtime(bridge: Any) -> SafetyPlannerRuntime:
             **context_inputs,
             temporal_context=timeout_context,
             position_metrics=metrics,
+            entry_score=_live_service()._position_entry_score(position),
         )
         return _live_service().evaluate_position_supervisor(context)
 

@@ -2107,6 +2107,8 @@ def test_build_position_supervisor_context_payload_preserves_supervisor_contract
             "sl": 2290.0,
             "tp": 2320.0,
             "type": "buy",
+            "current_price_state": "known",
+            "pnl_state": "known",
             "max_holding_seconds": 3600.0,
             "holding_timeout_ratio": 0.5,
         },
@@ -2137,6 +2139,8 @@ def test_build_position_supervisor_context_payload_preserves_supervisor_contract
     assert payload["position"]["current_price"] == 2312.5
     assert payload["position"]["stop_loss"] == 2290.0
     assert payload["position"]["take_profit"] == 2320.0
+    assert payload["position"]["current_price_state"] == "known"
+    assert payload["position"]["pnl_state"] == "known"
     assert payload["market"]["bid"] == 2312.5
     assert payload["market"]["ask"] == 2312.5
     assert payload["market"]["timeframe"] == "M5"
@@ -2240,6 +2244,10 @@ def test_build_position_supervisor_context_payload_uses_canonical_market_dimensi
     assert payload["market_space_context"]["atr_multiple_from_entry"] is None
     assert payload["market_space_context"]["range_location"] is None
     assert payload["market_space_context"]["structure_bias"] is None
+    # Missing broker component facts stay unknown; they must not be inferred
+    # from the numeric price/pnl values that happen to be present.
+    assert payload["position"]["current_price_state"] == "unknown"
+    assert payload["position"]["pnl_state"] == "unknown"
 
 
 def test_supervisor_recovery_projection_bounds_recursive_previous_verdict():
