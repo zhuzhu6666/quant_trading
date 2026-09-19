@@ -27,7 +27,10 @@ from backend.services.canonical_v2_reader import (
     review_row,
 )
 from backend.services.parameter_templates import ParameterTemplateService
-from backend.services.review_contract import normalize_trade_review_contract
+from backend.services.review_contract import (
+    normalize_trade_review_contract,
+    risk_policy_not_reached,
+)
 
 router = APIRouter(prefix="/api/risk", tags=["risk"])
 
@@ -262,14 +265,10 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
             action_json = _loads_json(row["action_json"], {})
             if not isinstance(action_json, dict):
                 continue
-            # These fields are written by build_skip_ledger_payload when
-            # RiskPolicy was not reached. Do not infer this from a missing
-            # verdict: the explicit stage and boolean are the authority.
-            if action_json.get("skip_stage") != "before_candidate":
-                continue
-            if action_json.get("risk_stage") != "not_reached":
-                continue
-            if action_json.get("risk_policy_reached") is not False:
+            # An absent verdict is also what an unwritten row looks like, so the
+            # explicit stage/boolean written by build_skip_ledger_payload is the
+            # only authority for "RiskPolicy was never reached".
+            if not risk_policy_not_reached(action_json):
                 continue
             blockers = action_json.get("blockers") or []
             if not isinstance(blockers, list):

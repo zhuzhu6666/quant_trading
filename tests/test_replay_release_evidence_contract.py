@@ -251,7 +251,8 @@ def test_factor_weight_execute_rejects_freshness_as_replay_evidence(
 def test_live_state_only_denial_is_not_a_replay_disagreement():
     """A live denial from a live-only gate is missing state, not divergence.
 
-    Counting the supervisor reentry cooldown / session loss streak / learned
+    Counting the supervisor reentry cooldown / entry-cluster same-direction
+    cooldown / session loss streak / learned
     entry threshold denials as risk-policy disagreements forced every
     governance replay to grade C, which left replay admission blocked and
     every approved factor weight suggestion unapplied (`blocked_by_replay`).
@@ -265,6 +266,10 @@ def test_live_state_only_denial_is_not_a_replay_disagreement():
     live = _verdict_signature({"allowed": False, "reason": "supervisor_reentry_cooldown"})
     replay = _verdict_signature({"allowed": True, "reason": "ok"})
     assert _is_live_state_only_denial(live, replay) is True
+    assert _is_live_state_only_denial(
+        _verdict_signature({"allowed": False, "reason": "learning_same_direction_cooldown"}),
+        replay,
+    ) is True
 
     # A genuine divergence still counts as a disagreement, in both directions.
     assert _is_live_state_only_denial(
@@ -431,3 +436,95 @@ def test_risk_recompute_routes_volume_shortcircuit_to_input_gap(monkeypatch):
     )
     assert flip["disagreement_count"] == 1
     assert flip["input_gap_count"] == 0
+
+
+def _pre_policy_report(tmp_path, monkeypatch, skip_action: dict):
+    import json as _json
+
+    from backend.services import replay_harness as rh
+
+    monkeypatch.setattr(
+        rh, "current_runtime_config_snapshot", lambda **_kw: {"config_hash": "cfg_hash"}
+    )
+    service = object.__new__(rh.ReplayHarnessService)
+    service.db_path = tmp_path / "state.db"
+    verdict = {"allowed": True, "reason": "ok"}
+    rows = [
+        {
+            "decision_id": "dec_evaluated",
+            "event_type": "open",
+            "decision_ts": 1.0,
+            "factor_snapshot_count": 1,
+            "action_json": _json.dumps(
+                {"gate_passed": True, "gate_reason": "pass", "risk_verdict": verdict}
+            ),
+            "risk_state_json": _json.dumps({"policy_verdict": verdict}),
+            "portfolio_state_json": "{}",
+        },
+        {
+            "decision_id": "dec_skip",
+            "event_type": "skip",
+            "decision_ts": 2.0,
+            "factor_snapshot_count": 1,
+            "action_json": _json.dumps(skip_action),
+            "risk_state_json": "{}",
+            "portfolio_state_json": "{}",
+        },
+    ]
+    return service._build_report(
+        run_id="replay_pre_policy",
+        scope={},
+        rows=rows,
+        created_at=0.0,
+        replay_error="",
+    )
+
+
+def test_pre_policy_skip_has_no_verdict_to_cover(tmp_path, monkeypatch):
+    """A row recording RiskPolicy as never reached is neither gap nor mismatch.
+
+    `build_skip_ledger_payload` persists a pre-candidate admission blocker
+    without a risk verdict on purpose, and marks it with the explicit
+    stage/boolean. Counting those rows as mismatches capped every report
+    containing one at grade C, and they also dragged verdict coverage below
+    the 0.80 gate - which, since the release gate was removed, is the only
+    admission left for a >=0.10 weight change.
+    """
+    report = _pre_policy_report(
+        tmp_path,
+        monkeypatch,
+        {
+            "gate_passed": True,
+            "gate_reason": "pass",
+            "skip_stage": "before_candidate",
+            "risk_stage": "not_reached",
+            "risk_policy_reached": False,
+        },
+    )
+    metrics = report["metric_summary"]
+
+    assert report["decision_count"] == 2
+    assert report["mismatch_count"] == 0
+    assert report["evidence_grade"] == "A"
+    assert metrics["pre_policy_skip_count"] == 1
+    assert metrics["risk_verdict_decision_count"] == 1
+    assert metrics["risk_verdict_coverage"] == 1.0
+
+
+def test_skip_without_explicit_marker_still_counts_as_mismatch(tmp_path, monkeypatch):
+    """The exemption is bound to the explicit authority, not to `event_type`.
+
+    A skip row that simply carries no verdict is an evidence gap and must keep
+    counting, otherwise any unwritten verdict would silently pass grading.
+    """
+    report = _pre_policy_report(
+        tmp_path,
+        monkeypatch,
+        {"gate_passed": True, "gate_reason": "pass"},
+    )
+    metrics = report["metric_summary"]
+
+    assert report["mismatch_count"] == 1
+    assert metrics["pre_policy_skip_count"] == 0
+    assert metrics["risk_verdict_coverage"] == 0.5
+    assert report["evidence_grade"] == "C"

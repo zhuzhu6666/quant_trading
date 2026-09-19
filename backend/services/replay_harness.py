@@ -31,7 +31,10 @@ from backend.services.canonical_v2_reader import (
 )
 from backend.services.evolution_ledger import current_runtime_config_snapshot
 from backend.services.fact_envelope import observed_epoch
-from backend.services.review_contract import review_has_system_contamination
+from backend.services.review_contract import (
+    review_has_system_contamination,
+    risk_policy_not_reached,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -191,8 +194,9 @@ def _verdict_signature(verdict: dict[str, Any]) -> tuple[Any, str]:
 
 
 # Live verdicts denied by gates that depend on live-only state which the replay
-# cannot reconstruct: the supervisor reentry cooldown clock, the session loss
-# streak and the learned entry threshold.  A live denial from one of these is
+# cannot reconstruct: the supervisor reentry cooldown clock, the entry-cluster
+# same-direction cooldown clock, the session loss streak and the learned entry
+# threshold.  A live denial from one of these is
 # missing state, not evidence that the offline recompute diverges.  Counting it
 # as a disagreement forced every governance replay to grade C (2026-09-13:
 # 39 cooldown + 5 threshold + 3 loss-streak denials out of 80 decisions), which
@@ -201,6 +205,7 @@ def _verdict_signature(verdict: dict[str, Any]) -> tuple[Any, str]:
 LIVE_STATE_ONLY_DENIAL_REASONS = frozenset(
     {
         "supervisor_reentry_cooldown",
+        "learning_same_direction_cooldown",
         "loss_cooldown_active",
         "learning_weak_signal_threshold",
     }
@@ -2795,6 +2800,7 @@ class ReplayHarnessService:
         factor_covered = 0
         gate_covered = 0
         risk_covered = 0
+        pre_policy_skipped = 0
         risk_verdict_disagreements = 0
         dataset_fingerprint: list[dict[str, Any]] = []
         for row in rows:
@@ -2813,7 +2819,11 @@ class ReplayHarnessService:
                 gate_covered += 1
             else:
                 row_issues.append("missing_gate_payload")
-            if state_verdict or action_verdict:
+            if risk_policy_not_reached(action):
+                # The row states RiskPolicy never ran, so there is no verdict to
+                # cover: neither a gap nor a disagreement.
+                pre_policy_skipped += 1
+            elif state_verdict or action_verdict:
                 risk_covered += 1
             else:
                 row_issues.append("missing_risk_policy_verdict")
@@ -2839,8 +2849,9 @@ class ReplayHarnessService:
                 }
             )
         decision_count = len(rows)
+        risk_decision_count = decision_count - pre_policy_skipped
         mismatch_count = decision_count - matched
-        risk_coverage = risk_covered / decision_count if decision_count else 0.0
+        risk_coverage = risk_covered / risk_decision_count if risk_decision_count else 0.0
         gate_coverage = gate_covered / decision_count if decision_count else 0.0
         factor_coverage = factor_covered / decision_count if decision_count else 0.0
         mismatch_rate = mismatch_count / decision_count if decision_count else 1.0
@@ -2860,6 +2871,8 @@ class ReplayHarnessService:
             "factor_coverage": round(factor_coverage, 6),
             "gate_coverage": round(gate_coverage, 6),
             "risk_verdict_coverage": round(risk_coverage, 6),
+            "risk_verdict_decision_count": risk_decision_count,
+            "pre_policy_skip_count": pre_policy_skipped,
             "risk_verdict_disagreement_count": risk_verdict_disagreements,
             "mismatch_rate": round(mismatch_rate, 6),
             "mismatch_examples": mismatches,

@@ -25,6 +25,25 @@ SYSTEM_CONTAMINATION_LABELS = {
 
 ADVISORY_ONLY_HEALTH_COMPONENTS: set[str] = set()
 
+
+def risk_policy_not_reached(action: Mapping[str, Any] | None) -> bool:
+    """True when a decision row records explicitly that RiskPolicy never ran.
+
+    Written by ``live_tick_pipeline.build_skip_ledger_payload`` for a
+    pre-candidate admission blocker. Readers must test these fields instead of
+    inferring the fact from a missing ``risk_verdict`` — an absent verdict is
+    also what an unwritten row looks like, and reading it as a policy result
+    would invent a RiskPolicy outcome.
+    """
+    if not isinstance(action, Mapping):
+        return False
+    return (
+        str(action.get("skip_stage") or "") == "before_candidate"
+        and str(action.get("risk_stage") or "") == "not_reached"
+        and action.get("risk_policy_reached") is False
+    )
+
+
 # B2: canonical responsibility-domain vocabulary.  system-issue override
 # domains (operator_intervention / execution_timing / data_quality) and the
 # failure-taxonomy domains share one enumeration so no consumer can hold a
