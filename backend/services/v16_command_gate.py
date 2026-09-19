@@ -524,7 +524,7 @@ class V16CommandGate:
             conn,
             """SELECT command_id, candidate_id, target_agent, scope_type, scope_key,
                       action, claim_status, claim_token, claim_expires_at,
-                      posterior_fingerprint, evidence_fingerprint,
+                      posterior_fingerprint, evidence_fingerprint, evidence_json,
                       authority_issued_at, created_at
                FROM v16_brain_command WHERE command_id=?""",
             (str(command_id),),

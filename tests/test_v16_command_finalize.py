@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import json
 import time
 
 from backend.services._brain_helpers import connect, execute
+from backend.services.brain_governance_candidate_review import (
+    ensure_brain_governance_candidate_review_table,
+)
+from backend.services.brain_governance_candidates import (
+    BrainGovernanceCandidateService,
+    ensure_brain_governance_candidate_table,
+    ensure_policy_suggestion_table,
+)
 from backend.services.v16_command_gate import V16CommandGate
 
 
@@ -304,3 +313,116 @@ def test_v16_validate_claim_accepts_cycle_command_for_narrow_action(tmp_path):
         conn.close()
     assert result["allowed"] is True
     assert result["status"] == "v16_command_claim_binding_valid"
+
+
+def test_candidate_bound_claim_survives_in_transaction_revalidation(tmp_path):
+    """回归：真实候选链的 claim 在 Coordinator 事务内复验时被误判绑定无效。
+
+    生产监督模板链（2026-09-19 01:47 周期）claim 成功、进到 Coordinator，事务内
+    复验抛 GovernanceMutationError: v16_command_candidate_binding_invalid，
+    apply_count=0 并 release 回 available。原因是 validate_claim_in_transaction
+    的 SELECT 漏了 evidence_json —— 绑定复验要靠它比对最新 review 的
+    evidence_fingerprint，读不到就判无效。没有 candidate 行的合成命令走早退分支，
+    所以只有真正的候选链被这一列卡死。
+    """
+    db_path = tmp_path / "candidate-binding.db"
+    ensure_brain_governance_candidate_table(db_path)
+    ensure_policy_suggestion_table(db_path)
+    ensure_brain_governance_candidate_review_table(db_path)
+    BrainGovernanceCandidateService(db_path).create_candidate(
+        candidate_id="cand-bind",
+        source_agent="v16_brain",
+        source_kind="supervisor_template",
+        source_ref_type="test",
+        source_ref_id="eval-bind",
+        proposal_stage="governance_ready",
+        capability_scope="medium_impact_governance",
+        scope_type="supervisor_template",
+        scope_key="position_supervisor",
+        action="switch_position_supervisor_template",
+        confidence=0.8,
+        evidence_score=0.8,
+        risk_class="medium",
+        max_impact="medium_impact",
+        risk_verdict={"allowed": True},
+        status="active",
+        persist=True,
+    )
+    fingerprint = "f" * 64
+    now = time.time()
+    V16CommandGate.ensure_finalize_schema(db_path)
+    conn = connect(db_path)
+    execute(
+        conn,
+        """UPDATE brain_governance_candidate
+           SET status='awaiting_execution', submitted_suggestion_id='sug-bind'
+           WHERE candidate_id=?""",
+        ("cand-bind",),
+    )
+    execute(
+        conn,
+        """INSERT INTO brain_governance_candidate_review
+           (review_id, candidate_id, review_status, bridge_ready, bridge_reason,
+            evidence_gaps_json, conflict_json, bridge_preview_json,
+            source_reliability_json, llm_advisory_json, boundary_json,
+            evidence_fingerprint, created_at)
+           VALUES ('review-bind', 'cand-bind', 'bridge_ready', 1, '', '[]', '{}',
+                   '{}', '{}', '{}', '{}', ?, ?)""",
+        (fingerprint, now + 2.0),
+    )
+    execute(
+        conn,
+        """INSERT INTO policy_suggestion
+           (suggestion_id, scope_type, scope_key, action, status, governance_eligible,
+            applied_mutation_id, created_at)
+           VALUES ('sug-bind', 'position_supervisor_template',
+                   'position_supervisor:auto_overprotection_relief.1111111111.v1',
+                   'switch_position_supervisor_template', 'approved', 1, '', ?)""",
+        (now,),
+    )
+    execute(
+        conn,
+        """INSERT INTO v16_brain_command
+           (command_id, candidate_id, target_agent, scope_type, scope_key, action,
+            decision, status, evidence_json, delegation_json, max_apply_count,
+            authority_issued_at, created_at, updated_at)
+           VALUES ('cmd-bind', 'cand-bind', 'position_supervisor_governance',
+                   'supervisor_template', 'position_supervisor',
+                   'switch_position_supervisor_template', 'delegate', 'active', ?, '{}',
+                   1, ?, ?, ?)""",
+        (
+            json.dumps({"governance": {"candidate_review": {"evidence_fingerprint": fingerprint}}}),
+            now,
+            now,
+            now,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    claim = V16CommandGate.claim(
+        db_path,
+        target_agent="position_supervisor_governance",
+        scope_type="supervisor_template",
+        scope_key="position_supervisor",
+        action="switch_position_supervisor_template",
+        candidate_id="cand-bind",
+    )
+    assert claim["allowed"] is True, claim
+
+    conn = connect(db_path)
+    try:
+        validated = V16CommandGate.validate_claim_in_transaction(
+            conn,
+            command_id=claim["command_id"],
+            claim_token=claim["claim_token"],
+            target_agent="position_supervisor_governance",
+            scope_type="supervisor_template",
+            scope_key="position_supervisor",
+            action="switch_position_supervisor_template",
+            candidate_id="cand-bind",
+            mutation_id="gmut-bind",
+        )
+    finally:
+        conn.close()
+    assert validated["allowed"] is True, validated
