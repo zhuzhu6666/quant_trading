@@ -1,7 +1,7 @@
 # 分期修复故障与验收矩阵
 
 > Status: active acceptance index
-> Snapshot: 2026-09-12 (新增 §11 L0 事实层修复批；§2-§10 仍引用各自批次的验收证据，最新运行计数以 phased-repair-rollout-status.md 为准)
+> Snapshot: 2026-09-23 (新增 §13 候选评审冲突集的 completed-chain 让面；§2-§12 仍引用各自批次的验收证据，最新运行计数以 phased-repair-rollout-status.md 为准)
 > Scope: reproducible acceptance evidence and unresolved live evidence
 
 本文只记录“如何证明”和当前未满足的运行证据。架构事实见 `system-source-of-truth.md`，实施阶段见 `planning/production-autonomy-repair-optimization-plan.md`，当前状态见 `phased-repair-rollout-status.md`。已完成批次的详细流水通过 Git 历史追溯，不在本矩阵重复保存。
@@ -244,3 +244,55 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 回放写入均为惰性治理事实（candidate/command/review/suggestion，无 application；候选 24h 过期），不影响交易链。
 
 第二次受控重启（2026-09-13 18:46，用户授权，加载 `6ed0d878`）：只读预检 schema `37/37 ok`、loop enabled、no open positions；重启 backend 18:46:32 → workers 18:47:44/18:47:50；release_identity `head=9f7cb2e8`、`clean=true`；三服务 journal `ERROR|Traceback` 均为 0；readiness `blockers=[]`；loop 自动恢复 generation `e4ed0c62`；overlay restored `hash=a03704a7`。该 overlay hash 变化（前值 `57ad9b8c`）来源已核实为回放触发的 `register_supervisor_shadow` governed mutation（`0d6f49ce-d98e-50ea-98ac-b6e15993c314`，actor `system:supervisor_governance`，18:00 committed，run_id `factor_lifecycle:position_supervisor:auto_overprotection_relief.bfabfc4bed.v1`），属出生钩设计行为，不是配置漂移。
+
+## 13. 候选评审冲突集的 completed-chain 让面（2026-09-23，方案 a）
+
+| 合同 | 权威 / 针对性证据 |
+|---|---|
+| 冲突集唯一计算者 | `BrainGovernanceCandidateReviewService._active_policy_suggestions()`：`proposed/approved` 与"无 `applied_mutation_id` 的 `applied`"占面；`applied` + 已绑定 mutation + 归属候选终态让面 |
+| 终态定义 | 复用 `brain_governance_candidates.CANDIDATE_TERMINAL_STATUSES`（未新增第二份定义）；归属关系用 `brain_governance_candidate.submitted_suggestion_id` |
+| 主路径测试 | `tests/test_agent_coordination_fixes.py::test_applied_bound_chain_releases_the_control_surface_for_successors`：完成链不冲突 + pending 链仍 `conflict_detected`；短路新判据即红（实测落在 `assert True is False`） |
+| 夹具对齐 | `tests/test_position_supervisor_governance.py` 的 `policy_suggestion` 夹具补 canonical 列 `applied_mutation_id`（与 `backend/core/db.py` DDL 一致，生产代码未加兼容分支） |
+
+定向验证：治理/监督相关 7 个测试文件 99 passed；全量回归 3004 passed / 11 skipped（`TMPDIR=/tmp`）。
+
+运行证据（2026-09-23 09:39:29 CST 用户授权三服务受控重启加载）：`overlay restored`、治理投影 `attempted=100 current=100 degraded=0`、backend 与 worker `release_identity` 一致（`head=a2d87a3c` / `worktree_fingerprint=6370e0ac…` / `clean=false` 未提交工作区）、readiness `ok=true/blockers=[]/ready_for_live_execution=true`、loop `running/accepting_new_risk=true`、`system_health` 全 ok、migration 37/37；只读探针 `_active_policy_suggestions()` 的 `position_supervisor_template` 行数 **0**（已 applied 的 `brain_bridge_b312ee6c…` 让面）。
+
+只读复算探针（`review_candidate(persist=False)`，与生产写入共用同一函数）：当前活跃候选 `brain_candidate_psv_b84589e0d3db6e51` 返回 `review_status=bridge_ready` / `has_conflict=false` / `evidence_gaps=[]`（修复前恒 `conflict_detected`）；重启后 tick 25 起恢复真实交易（`ORDER+AMEND OK pos=291594684`）。
+
+未完成运行证据：调度管线将上述评审落库并走到 bridge → command → claim 连续证据（nursery 每整点 :17 运行，受周期耗时/停摆影响可能顺延）。
+
+## 14. 治理块读侧收窄：counterfactual 下推 + 训练样本轻投影（2026-09-24）
+
+| 合同 | 权威 / 针对性证据 |
+|---|---|
+| counterfactual 过滤读的唯一路径 | `canonical_v2_reader.iter_counterfactual_rows`：`review_id` 先经 canonical `reviews` lineage 边（`event_relation(to_event_id, relation_type)` 既有索引）取候选事件再 flatten；其余 filter 仍走全流（该流除 lineage 与 `entity_id` 外无可索引列） |
+| 过滤读不得解码无关 payload | `tests/test_canonical_v2.py::test_reader_counterfactual_is_canonical_and_json_aliases_are_available`：夹具按真实链路 `record_review` + lineage 边，断言 `read_payload` 只被命中行调用；短路下推实测红（`AssertionError`） |
+| 样本资格计数不物化证据列 | `canonical_v2_reader.iter_training_sample_eligibility` 为同流同序的 5 字段轻投影；`factor_evidence_summary` 用计数替代 `linked[factor].append(s)` 保留 |
+| 资格字段口径未变 | 最新 200 行 `decision_id/source_id/label_status/governance_eligible/system_contaminated` 与 dict 变体 parity OK |
+| 替代对象已删除 | `feature_provider` 对 `iter_training_sample_rows(limit=0)` 的整表物化与相应导入已删；dict 变体保留给其余 12 处调用方（未双轨） |
+
+定向验证：`tests/test_canonical_v2.py` 25 passed；counterfactual 消费域 5 文件 97 passed；治理/卡片 109 passed（`test_factor_evidence_summary_uses_embedded_decision_snapshots_once` 的 spy 改指新投影）。
+
+生产数据只读复核（未加载）：P0 146/146 review **0 mismatch**（id + label/position/maturity），单次 **2.5~3.9s → 8.7ms**；P1 轻投影 **+1266MB → +10MB**，`factor_evidence_summary`（60 因子）**0.72s / RSS +0MB**。
+
+已加载运行证据（2026-09-24 03:54:14/03:56:02/03:58:56 CST 三服务受控重启，用户授权）：P1 生产兑现——`[autonomous] mem after list_recommendations: rss=663.1MB` vs 修复前 1772.3/1777.4/1778.1MB（-63%），04:42 轮 5s 间隔全程采样 RSS 546~785MB（峰值 785MB、同轮 `VmHWM` 1745MB 未抬升；该 HWM 系 04:03:37→04:41:22 两段抬升、非 04:42 轮产生，floor 之上其余峰值未归因）；`autonomous_learning` 1247.9~1260.0s → **1098.1s**（时间只兑现 -75~-90s）。P0 治理块**未被产线触发**：posture 自 09-23 18:24 起 `shadow_only`（最后 replay 报告 09-22 18:2x，`stale_after=86400s` 到期归零；replay 由 nursery 的 `run_bar_replay_evidence` 产出，nursery 自 09-22 18:25 起未完成整轮），04:30:31 轮 catalog 后 10s 收尾、无 `mem after redundancy` ⇒ 该块收益暂只能由生产数据只读探针与等价性证据承载。
+
+未完成运行证据：① 治理块产线复现（需 posture 回到非 `shadow_only`，即 nursery 恢复）；② 登记册退出线 p50 ≤300s 与连续 24h 无单轮 >900s 的棘轮观察未开始计时；③ 剩余耗时定位（py-spy 132.7s @50Hz：`mature_position_supervisor_traces → iter_counterfactual_rows` 每条 trace 一次全流 flatten 占 37.4%、`_reviews_desc → iter_reviews → _review_resolution_from_rows` 23.1%、`get_position_supervisor_template → iter_applications` ~10%）——三处均在本批替代清单外，是否按同族收窄待最小计划与裁定。
+
+## 15. 样本成熟/物化路径的读侧放大收窄（2026-09-24，第二刀）
+
+| 合同 | 权威 / 针对性证据 |
+|---|---|
+| counterfactual 流每函数只读一次 | `autonomous_learning.mature_position_supervisor_traces` / `_auto_apply_position_supervisor_template_suggestions`：流读一次并按 `position_id` 分组；逐 position 过滤读已删除 |
+| review 流每函数只读一次 | `_latest_review_by_id(reviews_desc)` 索引 + `_attach_source_review(row, *, review_by_id)`；`_latest_review_row` 与 `_review_for_open_decision` 无索引回退分支已删（唯一实现，无第二读路径） |
+| binding 校验不重复归一化 | `position_supervisor_templates._normalized_template_hash(normalized)`：`verify_position_supervisor_binding` 直接用已归一化对象取哈希，同一次校验不再产生第二次 state 读 |
+| 判据未变 | 哈希口径、校验结果与归一化语义不变：生产数据 6/6 模板哈希一致、真实 binding 仍 `valid=True/binding_verified` |
+
+定向验证：`tests/test_autonomous_learning.py` + `tests/test_position_supervisor_binding.py` 61 passed；全量回归 3004 passed / 11 skipped。
+
+生产数据只读等价性：A 分组读 vs 逐 position 过滤读 40 样本 0 mismatch（1143ms/次 → 2.9s/次）；B 索引查找 vs 全流重扫 60 样本 0 mismatch（596ms/次 → ~0ms）；C 如上。
+
+已加载运行证据：① 第二刀（12:43:44 backend / 13:02:26 learning worker / 12:44 job worker）：预检 migration 37/37、readiness `ok=true/ready_for_live_execution=true`、broker 无持仓、job worker 空闲；两服务 `overlay restored hash=d86bcd07…` 一致、投影 100/100/0、0 ERROR；加载前同口径基线（旧码）12:42 轮 1212.2s、`list_recommendations` 阶段 ≈1181s；加载后 13:12 轮 `list_recommendations` 阶段 **249s**、`finished autonomous_learning in **294.9s**`（-76%），13:17:00 `autonomous_evolution_nursery` 即刻取锁并 157.3s 完成（`run_bar_replay_evidence` ok，自 09-22 18:25 停摆后首次整轮）；13:39 supervisor_learning 33.6s。② 被本刀解锁的 P0/P1 复现（13:23 / 13:53 两轮）：posture 回到 `full` 后治理块 **39s / 30.1s**、块内 RSS **+325MB / +308MB**（对照修复前 265~416s / +1344~+1490MB），`evolution_hourly` **154.9s / 146.6s**（09-14 基线带 129.4~180.6s 内），残留 30s 取样无单一热点（JSON 30% / 短命连接 26% / payload 解码 20%）。
+
+未完成运行证据：连续 24h 无单轮 >900s 的棘轮观察；floor 之上 ~1.7GB 残留峰归因（只许只读观测）。
