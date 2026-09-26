@@ -584,7 +584,8 @@ def test_reader_supervisor_trace_is_canonical_and_payload_flattened() -> None:
     assert events[0]["event_type"] == "supervisor_trace"
 
 
-def test_reader_counterfactual_is_canonical_and_json_aliases_are_available() -> None:
+def test_reader_counterfactual_is_canonical_and_json_aliases_are_available(monkeypatch) -> None:
+    import backend.services.canonical_v2_reader as reader
     from backend.services.canonical_v2_reader import iter_counterfactual_rows
 
     conn = _canonical_sqlite()
@@ -596,6 +597,7 @@ def test_reader_counterfactual_is_canonical_and_json_aliases_are_available() -> 
         "horizons": [{"minutes": 60, "label": "better"}],
         "evidence": {"maturity": {"governance_eligible": True}},
     }
+    record_review(conn, review_id="review-1", position_id="position-1", pnl=1.0)
     ref = put_payload(conn, payload, payload_kind="counterfactual_review", schema_version="v1")
     append_event(
         conn,
@@ -604,8 +606,39 @@ def test_reader_counterfactual_is_canonical_and_json_aliases_are_available() -> 
         entity_id="cf-1",
         payload_hash=ref.payload_hash,
         producer="counterfactual-reader-test",
+        event_id="counterfactual_event_cf1",
         observed_at=datetime(2026, 8, 4, 11, 0, tzinfo=timezone.utc),
     )
+    # Same lineage edge record_counterfactual_event writes for the owning review.
+    append_relation(
+        conn,
+        from_event_id="counterfactual_event_cf1",
+        to_event_id="live_review_review-1",
+        relation_type="reviews",
+    )
+    other_payload = {**payload, "counterfactual_id": "cf-2", "review_id": "review-2"}
+    other_ref = put_payload(
+        conn, other_payload, payload_kind="counterfactual_review", schema_version="v1"
+    )
+    append_event(
+        conn,
+        event_type="counterfactual_review",
+        entity_type="supervisor_counterfactual_review",
+        entity_id="cf-2",
+        payload_hash=other_ref.payload_hash,
+        producer="counterfactual-reader-test",
+        event_id="counterfactual_event_cf2",
+        observed_at=datetime(2026, 8, 4, 11, 5, tzinfo=timezone.utc),
+    )
+
+    decoded: list[str] = []
+    real_read_payload = reader.read_payload
+
+    def _counting_read_payload(conn_arg, payload_hash):
+        decoded.append(str(payload_hash))
+        return real_read_payload(conn_arg, payload_hash)
+
+    monkeypatch.setattr(reader, "read_payload", _counting_read_payload)
 
     rows = iter_counterfactual_rows(conn, review_id="review-1")
     assert len(rows) == 1
@@ -613,6 +646,8 @@ def test_reader_counterfactual_is_canonical_and_json_aliases_are_available() -> 
     assert rows[0]["counterfactual_id"] == "cf-1"
     assert json.loads(rows[0]["horizons_json"]) == payload["horizons"]
     assert json.loads(rows[0]["evidence_json"]) == payload["evidence"]
+    # A filtered read decodes only the payloads its lineage selects.
+    assert decoded == [ref.payload_hash]
 
 
 def test_reader_does_not_read_retired_table_without_canonical_schema() -> None:

@@ -23,7 +23,7 @@ from backend.services.canonical_v2_reader import (
     iter_order_rows,
     iter_position_rows,
     iter_review_rows_desc,
-    iter_training_sample_rows,
+    iter_training_sample_eligibility,
     review_row,
 )
 from backend.services.review_contract import review_has_system_contamination
@@ -1431,8 +1431,7 @@ class LearningFeatureProvider:
             with self._conn() as conn:
                 if not canonical_ready(conn):
                     raise RuntimeError("canonical_v2 reader is unavailable")
-                sampled_rows = iter_training_sample_rows(conn, limit=0)
-                linked: dict[str, list[dict[str, Any]]] = {factor_id: [] for factor_id in ids}
+                sampled_rows = iter_training_sample_eligibility(conn, limit=0)
                 d_factors: dict[str, list[str]] = defaultdict(list)
                 r_factors: dict[str, list[str]] = defaultdict(list)
                 decision_observations: dict[str, int] = defaultdict(int)
@@ -1490,6 +1489,8 @@ class LearningFeatureProvider:
                         6,
                     ) if recent_observations else 0.0
                     result[factor_id]["factor_linked_trade_reviews"] = len(review_links.get(factor_id, set()))
+                sample_counts: dict[str, int] = defaultdict(int)
+                mature_counts: dict[str, int] = defaultdict(int)
                 for s in sampled_rows:
                     factors: set[str] = set()
                     decision_id = str(s.get("decision_id") or "")
@@ -1498,19 +1499,24 @@ class LearningFeatureProvider:
                     source_id = str(s.get("source_id") or "")
                     for fid in r_factors.get(source_id, ()):
                         factors.add(fid)
-                    for factor_id in factors:
-                        linked[factor_id].append(s)
-                for factor_id, items in linked.items():
-                    if not items:
+                    if not factors:
                         continue
-                    mature_n = sum(
-                        1 for item in items
-                        if item.get("label_status") == "matured"
-                        and bool(item.get("governance_eligible"))
-                        and not bool(item.get("system_contaminated"))
+                    matured = (
+                        s.get("label_status") == "matured"
+                        and bool(s.get("governance_eligible"))
+                        and not bool(s.get("system_contaminated"))
                     )
-                    result[factor_id]["governance_eligible_mature"] = mature_n
-                    result[factor_id]["contaminated_or_ineligible"] = len(items) - mature_n
+                    for factor_id in factors:
+                        sample_counts[factor_id] += 1
+                        if matured:
+                            mature_counts[factor_id] += 1
+                for factor_id, sample_count in sample_counts.items():
+                    result[factor_id]["governance_eligible_mature"] = mature_counts.get(
+                        factor_id, 0
+                    )
+                    result[factor_id]["contaminated_or_ineligible"] = (
+                        sample_count - mature_counts.get(factor_id, 0)
+                    )
 
                 id_set = {str(i) for i in ids}
                 counts: dict[str, int] = defaultdict(int)

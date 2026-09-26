@@ -949,7 +949,7 @@ def test_factor_evidence_summary_uses_embedded_decision_snapshots_once(
     monkeypatch.setattr(feature_provider, "canonical_ready", lambda _conn: True)
     monkeypatch.setattr(
         feature_provider,
-        "iter_training_sample_rows",
+        "iter_training_sample_eligibility",
         lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(

@@ -1352,27 +1352,35 @@ def _review_index(
     return by_entry, by_position
 
 
-def _latest_review_row(conn: Any, review_id: str) -> dict[str, Any] | None:
-    if not review_id:
-        return None
-    return next(
-        (
-            row
-            for row in _reviews_desc(conn)
-            if str(row.get("review_id") or "") == str(review_id)
-        ),
-        None,
-    )
+def _latest_review_by_id(
+    reviews_desc: list[dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    """Index the newest review revision per review id for one caller loop.
+
+    ``_reviews_desc`` already collapses canonical revisions, so the first row
+    for an id is the same row ``_latest_review_row`` used to pick by rescanning
+    the whole stream for every lookup.
+    """
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in reviews_desc or []:
+        review_id = str(row.get("review_id") or "")
+        if review_id and review_id not in by_id:
+            by_id[review_id] = row
+    return by_id
 
 
-def _attach_source_review(conn: Any, row: Any) -> dict[str, Any]:
+def _attach_source_review(
+    row: Any,
+    *,
+    review_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
     """Attach the source review to a counterfactual/trace row.
 
     The source review is resolved through the canonical reader projection; no
     historical table join is permitted here.
     """
     review_id = str(_row_value(row, "review_id", "") or "")
-    review = _latest_review_row(conn, review_id) if review_id else None
+    review = review_by_id.get(review_id) if review_id else None
     if review is not None:
         return {
             **row,
@@ -1387,32 +1395,25 @@ def _attach_source_review(conn: Any, row: Any) -> dict[str, Any]:
 
 
 def _review_for_open_decision(
-    conn: Any,
     row: Any,
     *,
-    review_by_entry: dict[str, list[dict[str, Any]]] | None = None,
-    review_by_position: dict[str, list[dict[str, Any]]] | None = None,
+    review_by_entry: dict[str, list[dict[str, Any]]],
+    review_by_position: dict[str, list[dict[str, Any]]],
 ) -> Any | None:
     decision_id = str(_row_value(row, "decision_id", "") or "")
     position_id = str(_row_value(row, "position_id", "") or "")
     if not decision_id and not position_id:
         return None
-    # Canonical branch: newest-first indexes built once per caller loop.
-    if review_by_entry is not None:
-        if decision_id:
-            matches = review_by_entry.get(decision_id)
-            if matches:
-                return matches[0]
-        if position_id:
-            matches = review_by_position.get(position_id)
-            if matches:
-                return matches[0]
-        return None
-    for candidate in _reviews_desc(conn):
-        if decision_id and str(candidate.get("entry_decision_id") or "") == decision_id:
-            return candidate
-        if position_id and str(candidate.get("position_id") or "") == position_id:
-            return candidate
+    # Newest-first indexes built once per caller loop; per-row rescans of the
+    # whole canonical review stream were the amplification this replaces.
+    if decision_id:
+        matches = review_by_entry.get(decision_id)
+        if matches:
+            return matches[0]
+    if position_id:
+        matches = review_by_position.get(position_id)
+        if matches:
+            return matches[0]
     return None
 
 
@@ -2585,23 +2586,27 @@ def mature_position_supervisor_traces(
             traces.append(candidate)
             if len(traces) >= max(1, int(limit)):
                 break
+        # One canonical read per stream per cycle.  The maturation loop used to
+        # re-flatten the whole counterfactual stream (and, per candidate row,
+        # re-decode the whole review stream) for every trace: 500 traces x 693
+        # counterfactual rows x ~0.9s plus 500+ full review passes.
+        counterfactuals_by_position: dict[str, list[dict[str, Any]]] = {}
+        for row in iter_counterfactual_rows(conn, limit=0, reverse=True):
+            position_key = str(_row_value(row, "position_id", "") or "")
+            if position_key:
+                counterfactuals_by_position.setdefault(position_key, []).append(row)
+        review_by_id = _latest_review_by_id(_reviews_desc(conn))
         for trace in traces:
             cf = None
             cf_seen = False
             position_id = str(_row_value(trace, "position_id", "") or "")
             event_ts = float(_row_value(trace, "event_ts", 0.0) or 0.0)
-            cf_rows = iter_counterfactual_rows(
-                conn,
-                position_id=position_id,
-                limit=0,
-                reverse=True,
-            )
-            for candidate in cf_rows:
+            for candidate in counterfactuals_by_position.get(position_id, []):
                 close_ts = float(_row_value(candidate, "close_ts", 0.0) or 0.0)
                 if close_ts < event_ts:
                     continue
                 cf_seen = True
-                attached = _attach_source_review(conn, candidate)
+                attached = _attach_source_review(candidate, review_by_id=review_by_id)
                 if _counterfactual_source_is_clean(attached, conn):
                     cf = attached
                     break
@@ -2685,6 +2690,7 @@ def materialize_autonomous_learning_samples(
 
         reviews_desc = _reviews_desc(conn)
         review_by_entry, review_by_position = _review_index(reviews_desc)
+        review_by_id = _latest_review_by_id(reviews_desc)
         decisions = _decisions_desc(
             conn,
             limit=int(limit),
@@ -2698,7 +2704,6 @@ def materialize_autonomous_learning_samples(
             if event_type in {"open", "skip"}:
                 outcome_review = (
                     _review_for_open_decision(
-                        conn,
                         row,
                         review_by_entry=review_by_entry,
                         review_by_position=review_by_position,
@@ -2726,7 +2731,6 @@ def materialize_autonomous_learning_samples(
                         counts["risk_rejection"] += 1
             if event_type.startswith("supervisor_"):
                 outcome_review = _review_for_open_decision(
-                    conn,
                     row,
                     review_by_entry=review_by_entry,
                     review_by_position=review_by_position,
@@ -2766,7 +2770,7 @@ def materialize_autonomous_learning_samples(
 
         accepted_counterfactuals = 0
         for cf_row in iter_counterfactual_rows(conn, limit=0, reverse=True):
-            row = _attach_source_review(conn, cf_row)
+            row = _attach_source_review(cf_row, review_by_id=review_by_id)
             if not _counterfactual_source_is_clean(row, conn):
                 continue
             accepted_counterfactuals += 1
@@ -5646,6 +5650,15 @@ def _auto_apply_position_supervisor_template_suggestions(
             """,
             (int(limit),),
         ).fetchall()
+        # One canonical read per stream per call; the candidate loop used to
+        # re-flatten the whole counterfactual stream and re-decode the whole
+        # review stream for every suggestion it evaluated.
+        counterfactual_rows = (
+            iter_counterfactual_rows(conn, limit=0, reverse=True)
+            if canonical and rows
+            else []
+        )
+        review_by_id = _latest_review_by_id(_reviews_desc(conn)) if canonical and rows else {}
         switch_claimed = False
         for row in sorted(rows, key=_template_switch_priority, reverse=True):
             suggestion_id = str(row["suggestion_id"] or "")
@@ -5708,10 +5721,10 @@ def _auto_apply_position_supervisor_template_suggestions(
             accepted_counterfactuals = 0
             page_limit = 2000
             if canonical:
-                for cf_row in iter_counterfactual_rows(conn, limit=0, reverse=True):
+                for cf_row in counterfactual_rows:
                     if float(cf_row.get("close_ts") or 0.0) < float(row["created_at"] or 0.0):
                         continue
-                    attached = _attach_source_review(conn, cf_row)
+                    attached = _attach_source_review(cf_row, review_by_id=review_by_id)
                     if not _counterfactual_source_is_clean(attached, conn):
                         continue
                     cf_evidence = _loads(attached.get("evidence_json"), {})

@@ -1078,24 +1078,61 @@ def iter_counterfactual_rows(
     label: str = "",
     reverse: bool = True,
 ) -> list[dict[str, Any]]:
-    """Return flattened canonical ``counterfactual_review`` rows."""
-    rows = _iter_canonical_payload_events(
-        conn,
-        "counterfactual_review",
-        # A counterfactual can have multiple immutable maturity versions.  A
-        # consumer sees only the newest version for each logical id; apply the
-        # requested limit after that deduplication.
-        limit=0,
-        reverse=reverse,
-        filters={
-            "position_id": position_id,
-            "review_id": review_id,
-            "counterfactual_id": counterfactual_id,
-            "label": label,
-        },
-    )
+    """Return flattened canonical ``counterfactual_review`` rows.
+
+    ``review_id`` narrows through the canonical ``reviews`` lineage edge written
+    by ``record_counterfactual_event`` before any payload is decoded.  A
+    filtered read otherwise decodes every counterfactual version in the stream
+    (hundreds of ~90KB payloads) to keep a handful of rows, which dominated the
+    governance cycle.  The remaining filters stay payload-level because the
+    stream has no other indexed column than the lineage and ``entity_id``.
+    """
+    if review_id and _canonical_ready(conn):
+        direction = "DESC" if reverse else "ASC"
+        events = conn.execute(
+            sql(
+                conn,
+                "SELECT e.event_id, e.event_type, e.entity_type, e.entity_id, "
+                "e.payload_hash, e.observed_at, e.created_at "
+                "FROM canonical_v2.event e "
+                "JOIN canonical_v2.event_relation r ON r.from_event_id = e.event_id "
+                "WHERE e.event_type=? AND r.to_event_id=? AND r.relation_type=? "
+                f"ORDER BY e.observed_at {direction}, e.event_id {direction}",
+            ),
+            ("counterfactual_review", f"live_review_{review_id}", "reviews"),
+        ).fetchall()
+        rows = [
+            flattened
+            for flattened in (
+                _flatten_canonical_event(conn, row, "counterfactual_review")
+                for row in events
+            )
+            if flattened is not None
+        ]
+    else:
+        rows = _iter_canonical_payload_events(
+            conn,
+            "counterfactual_review",
+            # A counterfactual can have multiple immutable maturity versions.  A
+            # consumer sees only the newest version for each logical id; apply the
+            # requested limit after that deduplication.
+            limit=0,
+            reverse=reverse,
+        )
+    expected = {
+        key: str(value)
+        for key, value in (
+            ("position_id", position_id),
+            ("review_id", review_id),
+            ("counterfactual_id", counterfactual_id),
+            ("label", label),
+        )
+        if value
+    }
     latest: dict[str, dict[str, Any]] = {}
     for row in rows:
+        if any(str(row.get(key) or "") != value for key, value in expected.items()):
+            continue
         key = str(row.get("counterfactual_id") or row.get("entity_id") or "")
         if key and key not in latest:
             latest[key] = row
@@ -1237,6 +1274,49 @@ def iter_training_sample_rows(
     try:
         rows = conn.execute(sql(conn, q), tuple(params)).fetchall()
         return [r for r in (_dict_row(x, TRAINING_SAMPLE_COLUMNS) for x in rows) if r]
+    except Exception as exc:
+        if not _is_missing_schema(exc):
+            raise
+        return []
+
+
+TRAINING_SAMPLE_ELIGIBILITY_COLUMNS = (
+    "decision_id",
+    "source_id",
+    "label_status",
+    "governance_eligible",
+    "system_contaminated",
+)
+
+
+def iter_training_sample_eligibility(
+    conn: Any,
+    *,
+    limit: int = 0,
+) -> list[dict[str, Any]]:
+    """Iterate training samples as a lean eligibility projection.
+
+    Same stream and ordering as ``iter_training_sample_rows``, but only the
+    fields an eligibility count needs.  The full row shape carries ~22KB of
+    evidence JSON per sample, so materializing the stream for a count cost
+    ~1.2GB while none of that payload was read.
+    """
+    select_cols = ", ".join(TRAINING_SAMPLE_ELIGIBILITY_COLUMNS)
+    q = (
+        f"SELECT {select_cols} FROM canonical_v2.training_sample_row"
+        " ORDER BY created_at DESC"
+    )
+    if limit and int(limit) > 0:
+        q += f" LIMIT {int(limit)}"
+    try:
+        rows = conn.execute(sql(conn, q), ()).fetchall()
+        return [
+            row
+            for row in (
+                _dict_row(item, TRAINING_SAMPLE_ELIGIBILITY_COLUMNS) for item in rows
+            )
+            if row
+        ]
     except Exception as exc:
         if not _is_missing_schema(exc):
             raise

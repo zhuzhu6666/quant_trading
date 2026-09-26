@@ -42,7 +42,12 @@ def position_supervisor_template_hash(template: dict[str, Any] | str | None) -> 
     makes key ordering and harmless input formatting irrelevant.
     """
 
-    normalized = normalize_position_supervisor_template(template)
+    return _normalized_template_hash(normalize_position_supervisor_template(template))
+
+
+def _normalized_template_hash(normalized: dict[str, Any]) -> str:
+    """Hash an already-normalized template without a second state read."""
+
     payload = json.dumps(
         normalized,
         ensure_ascii=False,
@@ -184,7 +189,7 @@ def verify_position_supervisor_binding(
             "reason": "binding_template_version_mismatch",
             "binding": value,
         }
-    expected_hash = position_supervisor_template_hash(normalized)
+    expected_hash = _normalized_template_hash(normalized)
     if str(value.get("template_hash") or "") != expected_hash:
         return {
             "valid": False,
