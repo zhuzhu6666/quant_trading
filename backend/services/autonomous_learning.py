@@ -6203,9 +6203,7 @@ def apply_demo_autonomy(
         # closed as inconclusive and retried through a new governed application.
         demo_effect_reconcile = RuleEvolutionGovernor(str(db_path)).reconcile_application_effects(
             application_limit=2000,
-            mixed_recheck_after_seconds=0.0,
             max_observation_age_seconds=86400.0,
-            terminalize_mixed_after_recheck=True,
         )
     factor_pruning_governance = _run_demo_nursery_factor_pruning_governance(db_path=db_path, bridge_limit=5)
     conn = _connect(db_path)
@@ -6627,17 +6625,14 @@ def run_autonomous_learning_cycle(
         )
 
     gov = RuleEvolutionGovernor(str(db_path))
-    # Demo autonomy must not let an old observation-only window occupy a
-    # scope indefinitely.  demo_nursery already terminalizes via
-    # apply_demo_autonomy; demo_autonomous runs the same reconcile here so
-    # mixed/observing windows are closed as inconclusive (evidence quality
-    # preserved, retry_via_new_application=True) instead of blocking AWE
-    # weight adaptation forever.
+    # Demo autonomy closes an observation window on its own clock: one day is
+    # long enough to collect a live demo observation, and an absent/insufficient
+    # baseline is then recorded as inconclusive with retry_via_new_application.
+    # Terminalizing a mixed window on the very next cycle instead would leave
+    # the governed selection bar (matured comparable trades) unreachable.
     _effect_reconcile_kwargs = (
         {
-            "mixed_recheck_after_seconds": 0.0,
             "max_observation_age_seconds": 86400.0,
-            "terminalize_mixed_after_recheck": True,
         }
         if autonomy_mode() in {"demo_autonomous", "demo_nursery"}
         else {}

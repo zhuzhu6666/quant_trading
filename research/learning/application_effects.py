@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+IN_FLIGHT_EFFECT_STATUSES = frozenset({"observing", "mixed"})
+
+
 @dataclass(frozen=True)
 class EffectClassification:
     status: str
@@ -45,6 +48,6 @@ def observation_window_expired(
     now: float,
     max_age_seconds: float,
 ) -> bool:
-    if status not in {"observing", "mixed"} or cycle_ts < 946684800.0:
+    if status not in IN_FLIGHT_EFFECT_STATUSES or cycle_ts < 946684800.0:
         return False
     return max(0.0, now - cycle_ts) >= max(86400.0, max_age_seconds)

@@ -11,6 +11,7 @@ from backend.services.canonical_v2_reader import (
     iter_counterfactual_rows,
     iter_review_rows,
 )
+from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.position_supervisor_governance import (
     _counterfactual_summary,
     build_position_supervisor_advisories,
@@ -49,8 +50,20 @@ def _create_db(path):
         );
         """
     )
-    # 2026-06-26 10:00 Asia/Shanghai.
-    created_at = 1782439200.0
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS learning_application_log (
+            application_id TEXT PRIMARY KEY,
+            run_id TEXT DEFAULT '',
+            source TEXT DEFAULT '',
+            status TEXT DEFAULT 'prepared',
+            details_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL DEFAULT 0.0,
+            updated_at REAL DEFAULT 0.0
+        );
+        """
+    )
+    created_at = 1782439200.0  # 2026-06-26 10:00 Asia/Shanghai.
     review = {
         "position_id": "1001",
         "entry_ts": created_at - 60,
@@ -760,9 +773,8 @@ def test_position_supervisor_advisories_delegate_v16_switch_candidate(tmp_path, 
     }
 
 
-def test_counterfactual_overprotection_blocks_tighter_generated_template(tmp_path):
-    db_path = tmp_path / "state.db"
-    _create_db(db_path)
+def _seed_overprotection_reviews(db_path):
+    """Two protection_too_tight counterfactuals: one switch advisory is owed."""
     conn = sqlite3.connect(str(db_path))
     try:
         base_ts = 1782439300.0
@@ -828,6 +840,12 @@ def test_counterfactual_overprotection_blocks_tighter_generated_template(tmp_pat
     finally:
         conn.close()
 
+
+def test_counterfactual_overprotection_blocks_tighter_generated_template(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+    _seed_overprotection_reviews(db_path)
+
     result = build_position_supervisor_advisories(
         day="2026-06-26",
         db_path=db_path,
@@ -851,6 +869,34 @@ def test_counterfactual_overprotection_blocks_tighter_generated_template(tmp_pat
     assert any(
         item["reason"] == "counterfactual evidence shows protection is already too aggressive"
         for item in result["skipped"]
+    )
+
+
+def test_supervisor_switch_waits_for_the_open_observation_window(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+    _seed_overprotection_reviews(db_path)
+
+    clear = build_position_supervisor_advisories(day="2026-06-26", db_path=db_path)
+    assert clear["observation_window"]["state"] == "clear"
+    assert any(
+        item["action"] == "switch_position_supervisor_template" for item in clear["items"]
+    )
+
+    LearningApplicationStore(db_path).prepare_application(
+        scope_type="position_supervisor_template",
+        scope_key="position_supervisor:auto_overprotection_relief.seed.v1",
+        action="switch_position_supervisor_template",
+        status="observing",
+    )
+
+    held = build_position_supervisor_advisories(day="2026-06-26", db_path=db_path)
+    assert held["observation_window"]["state"] == "in_flight"
+    assert all(
+        item["action"] != "switch_position_supervisor_template" for item in held["items"]
+    )
+    assert any(
+        item["reason"] == "observation_window_in_flight" for item in held["skipped"]
     )
 
 

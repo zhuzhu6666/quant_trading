@@ -50,6 +50,7 @@ from backend.services.position_supervisor_templates import (
     verify_position_supervisor_binding,
 )
 from backend.services.review_contract import review_has_system_contamination
+from research.learning.application_effects import IN_FLIGHT_EFFECT_STATUSES
 
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
@@ -2156,6 +2157,36 @@ def _supervisor_switch_delegation_enabled() -> bool:
         return False
 
 
+def _supervisor_observation_in_flight(*, db_path: str | Path) -> dict[str, Any]:
+    """Report whether this control surface still has an open observation window.
+
+    A switch replaces the running control immediately, so a second switch while
+    the first window is still collecting terminalizes it on too few trades for
+    the selection evidence policy to ever accept it.  The window's own clock
+    (``observation_window_expired``) is what closes it; until then the surface
+    owes that window an uninterrupted run.
+    """
+    try:
+        store = LearningApplicationStore(db_path)
+        for index, app in enumerate(store.iter_applications(scope_type="position_supervisor_template")):
+            if index >= 20:
+                break
+            if str(app.get("action") or "") != "switch_position_supervisor_template":
+                continue
+            if str(app.get("status") or "") in IN_FLIGHT_EFFECT_STATUSES:
+                return {
+                    "state": "in_flight",
+                    "application_id": str(app.get("application_id") or ""),
+                    "status": str(app.get("status") or ""),
+                }
+    except Exception:
+        # The gate throttles suggestion volume; it is not an authority boundary,
+        # so an unreadable ledger keeps the existing advisory behavior and says
+        # so instead of pretending the surface is clear.
+        return {"state": "unknown"}
+    return {"state": "clear"}
+
+
 def build_position_supervisor_advisories(
     *,
     day: str = "2026-06-26",
@@ -2173,6 +2204,7 @@ def build_position_supervisor_advisories(
         counterfactual_summary = _counterfactual_summary(conn, day=day)
     finally:
         conn.close()
+    observation_window = _supervisor_observation_in_flight(db_path=db_path)
     replay_summary = {
         "sample_count": replay.get("sample_count"),
         "comparison": replay.get("comparison"),
@@ -2263,6 +2295,16 @@ def build_position_supervisor_advisories(
     ) -> None:
         candidate_template = evidence.get("candidate_template")
         if action == "switch_position_supervisor_template":
+            if observation_window.get("state") == "in_flight":
+                skipped.append(
+                    {
+                        "action": action,
+                        "reason": "observation_window_in_flight",
+                        "application_id": str(observation_window.get("application_id") or ""),
+                        "target_template_id": target_template_id,
+                    }
+                )
+                return
             contract = _single_control_candidate_contract(candidate_template)
             if not contract.get("ok"):
                 skipped.append(
@@ -2732,6 +2774,7 @@ def build_position_supervisor_advisories(
         },
         "items": suggestions,
         "skipped": skipped,
+        "observation_window": observation_window,
     }
 
 

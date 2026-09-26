@@ -1913,15 +1913,9 @@ def update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> boo
             _gov = RuleEvolutionGovernor()
             governance_result["review_pending"] = _gov.review_pending()
             governance_result["reconcile_active"] = _gov.reconcile_active()
-            # Keep the hourly chain consistent with run_autonomous_learning_cycle:
-            # in demo autonomy modes an observation-only window must not occupy
-            # a factor scope forever (mixed -> inconclusive, retry via a new
-            # governed application) instead of blocking AWE weight adaptation.
             _effect_reconcile_kwargs = (
                 {
-                    "mixed_recheck_after_seconds": 0.0,
                     "max_observation_age_seconds": 86400.0,
-                    "terminalize_mixed_after_recheck": True,
                 }
                 if autonomy_mode() in {"demo_autonomous", "demo_nursery"}
                 else {}
