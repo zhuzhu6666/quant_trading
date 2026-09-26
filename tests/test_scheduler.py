@@ -1,31 +1,8 @@
 import time
 
-import pytest
-
-from backend.runtime.scheduler import HAS_APSCHEDULER, InProcessScheduler, _TimerJob
+from backend.runtime.scheduler import InProcessScheduler
 from backend.services import learning_backfill
 from backend.services import supervisor_learning_scheduler
-
-
-def _interval(cron_expr: str) -> float:
-    return _TimerJob("test", cron_expr, lambda: None)._parse_interval_seconds()
-
-
-@pytest.mark.parametrize(
-    ("cron_expr", "expected"),
-    [
-        ("*/5 * * * *", 300.0),
-        ("0 * * * *", 3600.0),
-        ("20 * * * *", 3600.0),
-        ("0 */6 * * *", 21600.0),
-        ("0 3 * * *", 86400.0),
-        ("30 1 * * *", 86400.0),
-        ("0 5 * * 0", 604800.0),
-        ("0 4 1 */3 *", 8035200.0),
-    ],
-)
-def test_timer_scheduler_cron_fallback_preserves_frequency(cron_expr, expected):
-    assert _interval(cron_expr) == expected
 
 
 def test_supervisor_learning_cycle_keeps_advisories_observation_only(monkeypatch):
@@ -96,7 +73,6 @@ def test_learning_backfill_stop_cancels_delayed_run(monkeypatch):
     assert calls == []
 
 
-@pytest.mark.skipif(not HAS_APSCHEDULER, reason="APScheduler backend not installed")
 def test_apscheduler_add_job_before_start_does_not_require_next_run_time():
     scheduler = InProcessScheduler()
     scheduler.clear()

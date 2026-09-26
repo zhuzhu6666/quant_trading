@@ -1,7 +1,6 @@
 """backend/runtime/scheduler.py — InProcessScheduler (T14.3, 2026-06-11)
 
-Phase 2.4 进程内 Scheduler. 包装 apscheduler.BackgroundScheduler,
-当 apscheduler 未安装时降级到 threading.Timer 模式.
+Phase 2.4 进程内 Scheduler. 包装 apscheduler.BackgroundScheduler.
 
 用法:
     scheduler = InProcessScheduler()
@@ -19,21 +18,11 @@ import time as _time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_SUBMITTED
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# 尝试导入 apscheduler
-# ---------------------------------------------------------------------------
-try:
-    from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_SUBMITTED
-    from apscheduler.schedulers.background import BackgroundScheduler
-    from apscheduler.triggers.cron import CronTrigger
-
-    HAS_APSCHEDULER = True
-except ImportError:
-    EVENT_JOB_ERROR = EVENT_JOB_EXECUTED = EVENT_JOB_SUBMITTED = 0
-    HAS_APSCHEDULER = False
-    logger.info("apscheduler not installed, falling back to threading.Timer")
 
 
 @dataclass
@@ -62,181 +51,12 @@ def _next_run_epoch(job: Any) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Timer-mode 任务包装
-# ---------------------------------------------------------------------------
-class _TimerJob:
-    """threading.Timer 模式下的单个定时任务."""
-
-    def __init__(
-        self,
-        name: str,
-        cron_expr: str,
-        fn: Callable[[], Any],
-        on_error: Callable[[str, Exception], None] | None = None,
-    ):
-        self.name = name
-        self.cron_expr = cron_expr
-        self.fn = fn
-        self.on_error = on_error
-        self._timer: threading.Timer | None = None
-        self._stop_event = threading.Event()
-        self._lock = threading.Lock()
-        self._run_count = 0
-        self._error_count = 0
-        self._last_error = ""
-        self._last_run_time = 0.0
-        self._finished_at: float = 0.0
-
-    def _parse_interval_seconds(self) -> float:
-        """从 cron 表达式推算调度间隔(秒).
-
-        支持:
-          '*/5 * * * *' → 300, '0 * * * *' → 3600,
-          '0 */6 * * *' → 21600, '0 5 * * 0' → 604800.
-        """
-        parts = self.cron_expr.strip().split()
-        if len(parts) != 5:
-            return 3600.0
-        minute_str, hour_str, dom_str, month_str, dow_str = parts
-
-        # */N minute → 每 N 分钟
-        if minute_str.startswith("*/"):
-            try:
-                n = int(minute_str[2:])
-                if n > 0:
-                    return float(n * 60)
-            except ValueError:
-                pass
-
-        # * * * * * → 每分钟
-        if minute_str == "*" and hour_str == "*":
-            return 60.0
-
-        # M * * * * → 每小时的第 M 分钟.
-        if minute_str.isdigit() and hour_str == "*":
-            return 3600.0
-
-        # 0 */N * * * → 每 N 小时
-        if minute_str.isdigit() and hour_str.startswith("*/"):
-            try:
-                n = int(hour_str[2:])
-                if n > 0:
-                    return float(n * 3600)
-            except ValueError:
-                pass
-
-        # Weekly: 0 H * * D → every 7 days (604800s)
-        if (
-            minute_str.isdigit()
-            and hour_str.isdigit()
-            and dom_str == "*"
-            and month_str == "*"
-            and dow_str != "*"
-        ):
-            return 604800.0  # 7 days
-
-        # Daily: M H * * * → every day.
-        if (
-            minute_str.isdigit()
-            and hour_str.isdigit()
-            and dom_str == "*"
-            and month_str == "*"
-            and dow_str == "*"
-        ):
-            return 86400.0
-
-        # Monthly-ish/quarterly-ish jobs. Timer fallback cannot align calendar
-        # boundaries, but it must not collapse low-frequency jobs into hourly runs.
-        if minute_str.isdigit() and hour_str.isdigit() and dom_str.isdigit():
-            if month_str.startswith("*/"):
-                try:
-                    n = int(month_str[2:])
-                    if n > 0:
-                        return float(n * 31 * 86400)
-                except ValueError:
-                    pass
-            return 31 * 86400.0
-
-        return 3600.0  # 默认 1 小时
-
-    def start(self) -> None:
-        if self._stop_event.is_set():
-            return
-        interval = self._parse_interval_seconds()
-        self._schedule_next(interval)
-
-    def _schedule_next(self, interval: float) -> None:
-        if self._stop_event.is_set():
-            return
-        self._timer = threading.Timer(interval, self._run)
-        self._timer.daemon = True
-        self._timer.start()
-
-    def _run(self) -> None:
-        if self._stop_event.is_set():
-            return
-        try:
-            self.fn()
-            self._run_count += 1
-            self._last_run_time = _time.time()
-        except Exception as e:
-            self._error_count += 1
-            self._last_error = str(e)
-            logger.error(f"[scheduler][{self.name}] run error: {e}")
-            if self.on_error:
-                self.on_error(self.name, e)
-        # 重调度
-        if not self._stop_event.is_set():
-            interval = self._parse_interval_seconds()
-            self._schedule_next(interval)
-        self._finished_at = _time.time()
-
-    def stop(self) -> None:
-        self._stop_event.set()
-        with self._lock:
-            if self._timer:
-                self._timer.cancel()
-                self._timer = None
-
-    def run_now(self) -> None:
-        """立即执行一次 (不改变定时器), 并计入 run_count。"""
-        try:
-            self.fn()
-            self._run_count += 1
-            self._last_run_time = _time.time()
-        except Exception as e:
-            self._error_count += 1
-            self._last_error = str(e)
-            logger.error(f"[scheduler][{self.name}] run_now error: {e}")
-            if self.on_error:
-                self.on_error(self.name, e)
-
-    @property
-    def info(self) -> JobInfo:
-        next_run = (
-            self._finished_at + self._parse_interval_seconds()
-            if self._finished_at > 0
-            else _time.time() + self._parse_interval_seconds()
-        )
-        return JobInfo(
-            name=self.name,
-            cron_expr=self.cron_expr,
-            running=not self._stop_event.is_set(),
-            next_run_time=next_run,
-            last_run_time=self._last_run_time,
-            run_count=self._run_count,
-            error_count=self._error_count,
-            last_error=self._last_error,
-        )
-
-
-# ---------------------------------------------------------------------------
 # InProcessScheduler
 # ---------------------------------------------------------------------------
 class InProcessScheduler:
     """进程内 Scheduler.
 
-    包装 apscheduler.BackgroundScheduler, 降级到 threading.Timer.
+    包装 apscheduler.BackgroundScheduler.
     线程安全的单例.
     """
 
@@ -259,19 +79,14 @@ class InProcessScheduler:
         self._lock = threading.Lock()
         self._started = False
 
-        if HAS_APSCHEDULER:
-            self._apscheduler = BackgroundScheduler(
-                daemon=True,
-                timezone="UTC",
-            )
-            self._apscheduler.add_listener(self._aps_listener, mask=0xFFFF)
-            self._jobs_aps: dict[str, str] = {}  # name -> job_id
-            self._job_state: dict[str, JobInfo] = {}
-            logger.info("[InProcessScheduler] using apscheduler backend")
-        else:
-            self._apscheduler = None
-            self._jobs_timer: dict[str, _TimerJob] = {}
-            logger.info("[InProcessScheduler] using threading.Timer fallback backend")
+        self._apscheduler = BackgroundScheduler(
+            daemon=True,
+            timezone="UTC",
+        )
+        self._apscheduler.add_listener(self._aps_listener, mask=0xFFFF)
+        self._jobs_aps: dict[str, str] = {}  # name -> job_id
+        self._job_state: dict[str, JobInfo] = {}
+        logger.info("[InProcessScheduler] using apscheduler backend")
 
     # ── 生命周期 ────────────────────────────────────────────────────────
 
@@ -281,14 +96,7 @@ class InProcessScheduler:
             if self._started:
                 logger.warning("[InProcessScheduler] already started")
                 return
-            if HAS_APSCHEDULER and self._apscheduler:
-                self._apscheduler.start()
-            else:
-                # audit v9: 修复 Timer job 完全不启动的 bug
-                # add_job 时 _started 还是 False, 所以 job.start() 没被调
-                # 必须在 start() 里补启动所有已注册的 Timer job
-                for job in self._jobs_timer.values():
-                    job.start()
+            self._apscheduler.start()
             self._started = True
             logger.info("[InProcessScheduler] started")
 
@@ -297,12 +105,7 @@ class InProcessScheduler:
         with self._lock:
             if not self._started:
                 return
-            if HAS_APSCHEDULER and self._apscheduler:
-                self._apscheduler.shutdown(wait=wait)
-            else:
-                for job in list(self._jobs_timer.values()):
-                    job.stop()
-                self._jobs_timer.clear()
+            self._apscheduler.shutdown(wait=wait)
             self._started = False
             logger.info("[InProcessScheduler] stopped")
 
@@ -324,96 +127,72 @@ class InProcessScheduler:
             True 成功, False 失败 (已存在同名任务)
         """
         with self._lock:
-            if HAS_APSCHEDULER and self._apscheduler:
-                if name in self._jobs_aps:
-                    logger.warning(f"[InProcessScheduler] job {name} already exists")
-                    return False
-                try:
-                    trigger = CronTrigger.from_crontab(cron_expr, timezone="UTC")
-                    job = self._apscheduler.add_job(
-                        fn,
-                        trigger=trigger,
-                        name=name,
-                        id=name,
-                        replace_existing=False,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=300,
-                    )
-                    self._jobs_aps[name] = job.id
-                    self._job_state[name] = JobInfo(
-                        name=name,
-                        cron_expr=cron_expr,
-                        running=True,
-                        next_run_time=_next_run_epoch(job),
-                    )
-                except Exception as e:
-                    logger.error(f"[InProcessScheduler] add_job({name}) failed: {e}")
-                    return False
-            else:
-                if name in self._jobs_timer:
-                    logger.warning(f"[InProcessScheduler] job {name} already exists")
-                    return False
-                job = _TimerJob(name, cron_expr, fn)
-                if self._started:
-                    job.start()
-                self._jobs_timer[name] = job
+            if name in self._jobs_aps:
+                logger.warning(f"[InProcessScheduler] job {name} already exists")
+                return False
+            try:
+                trigger = CronTrigger.from_crontab(cron_expr, timezone="UTC")
+                job = self._apscheduler.add_job(
+                    fn,
+                    trigger=trigger,
+                    name=name,
+                    id=name,
+                    replace_existing=False,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=300,
+                )
+                self._jobs_aps[name] = job.id
+                self._job_state[name] = JobInfo(
+                    name=name,
+                    cron_expr=cron_expr,
+                    running=True,
+                    next_run_time=_next_run_epoch(job),
+                )
+            except Exception as e:
+                logger.error(f"[InProcessScheduler] add_job({name}) failed: {e}")
+                return False
             logger.info(f"[InProcessScheduler] add_job {name} ({cron_expr})")
             return True
 
     def run_job_now(self, name: str) -> bool:
         """立即执行指定任务一次, 计入 run_count。"""
         with self._lock:
-            if HAS_APSCHEDULER and self._apscheduler:
-                job_id = self._jobs_aps.get(name)
-                if job_id is None:
-                    logger.warning(f"[InProcessScheduler] job {name} not found")
-                    return False
-                started_at = _time.time()
-                try:
-                    job = self._apscheduler.get_job(job_id)
-                    if job:
-                        job.func()
-                        info = self._job_state.get(name)
-                        if info is None:
-                            info = JobInfo(name=name, cron_expr=str(job.trigger), running=True)
-                            self._job_state[name] = info
-                        info.last_run_time = _time.time()
-                        info.run_count += 1
-                        info.last_error = ""
-                except Exception as e:
+            job_id = self._jobs_aps.get(name)
+            if job_id is None:
+                logger.warning(f"[InProcessScheduler] job {name} not found")
+                return False
+            started_at = _time.time()
+            try:
+                job = self._apscheduler.get_job(job_id)
+                if job:
+                    job.func()
                     info = self._job_state.get(name)
-                    if info is not None:
-                        info.last_run_time = started_at
-                        info.error_count += 1
-                        info.last_error = str(e)[:500]
-                    logger.error(f"[InProcessScheduler] run_job_now({name}) failed: {e}")
-                    return False
-                return True
-            else:
-                job = self._jobs_timer.get(name)
-                if job is None:
-                    logger.warning(f"[InProcessScheduler] job {name} not found")
-                    return False
-                job.run_now()
-                return True
+                    if info is None:
+                        info = JobInfo(name=name, cron_expr=str(job.trigger), running=True)
+                        self._job_state[name] = info
+                    info.last_run_time = _time.time()
+                    info.run_count += 1
+                    info.last_error = ""
+            except Exception as e:
+                info = self._job_state.get(name)
+                if info is not None:
+                    info.last_run_time = started_at
+                    info.error_count += 1
+                    info.last_error = str(e)[:500]
+                logger.error(f"[InProcessScheduler] run_job_now({name}) failed: {e}")
+                return False
+            return True
 
     def remove_job(self, name: str) -> bool:
         """移除一个定时任务."""
         with self._lock:
-            if HAS_APSCHEDULER and self._apscheduler:
-                job_id = self._jobs_aps.pop(name, None)
-                if job_id is None:
-                    logger.warning(f"[InProcessScheduler] job {name} not found")
-                    return False
-                self._apscheduler.remove_job(job_id)
-                self._job_state.pop(name, None)
-            else:
-                job = self._jobs_timer.pop(name, None)
-                if job is None:
-                    logger.warning(f"[InProcessScheduler] job {name} not found")
-                    return False
-                job.stop()
+            job_id = self._jobs_aps.pop(name, None)
+            if job_id is None:
+                logger.warning(f"[InProcessScheduler] job {name} not found")
+                return False
+            self._apscheduler.remove_job(job_id)
+            self._job_state.pop(name, None)
             logger.info(f"[InProcessScheduler] remove_job {name}")
             return True
 
@@ -421,33 +200,29 @@ class InProcessScheduler:
         """列出所有任务的状态."""
         infos: list[JobInfo] = []
         with self._lock:
-            if HAS_APSCHEDULER and self._apscheduler:
-                for name, job_id in self._jobs_aps.items():
-                    try:
-                        job = self._apscheduler.get_job(job_id)
-                        if job:
-                            nrt = _next_run_epoch(job)
-                            state = self._job_state.get(name)
-                            if state is None:
-                                state = JobInfo(name=name, cron_expr=str(job.trigger), running=True)
-                                self._job_state[name] = state
-                            state.next_run_time = nrt
-                            state.running = True
-                            infos.append(JobInfo(
-                                name=name,
-                                cron_expr=state.cron_expr,
-                                running=state.running,
-                                next_run_time=nrt,
-                                last_run_time=state.last_run_time,
-                                run_count=state.run_count,
-                                error_count=state.error_count,
-                                last_error=state.last_error,
-                            ))
-                    except Exception:
-                        infos.append(JobInfo(name=name, cron_expr="", running=False))
-            else:
-                for job in self._jobs_timer.values():
-                    infos.append(job.info)
+            for name, job_id in self._jobs_aps.items():
+                try:
+                    job = self._apscheduler.get_job(job_id)
+                    if job:
+                        nrt = _next_run_epoch(job)
+                        state = self._job_state.get(name)
+                        if state is None:
+                            state = JobInfo(name=name, cron_expr=str(job.trigger), running=True)
+                            self._job_state[name] = state
+                        state.next_run_time = nrt
+                        state.running = True
+                        infos.append(JobInfo(
+                            name=name,
+                            cron_expr=state.cron_expr,
+                            running=state.running,
+                            next_run_time=nrt,
+                            last_run_time=state.last_run_time,
+                            run_count=state.run_count,
+                            error_count=state.error_count,
+                            last_error=state.last_error,
+                        ))
+                except Exception:
+                    infos.append(JobInfo(name=name, cron_expr="", running=False))
         return infos
 
     def get_job(self, name: str) -> JobInfo | None:
@@ -463,7 +238,7 @@ class InProcessScheduler:
         """监听 apscheduler 事件, 记录/metrics."""
         event_code = event.code if hasattr(event, "code") else 0
         job_id = event.job_id if hasattr(event, "job_id") else ""
-        if job_id and HAS_APSCHEDULER and self._apscheduler:
+        if job_id and self._apscheduler:
             try:
                 info = self._job_state.get(job_id)
                 if info is not None:
@@ -499,16 +274,11 @@ class InProcessScheduler:
     def clear(self) -> None:
         """清空所有任务 (不停止 scheduler)."""
         with self._lock:
-            if HAS_APSCHEDULER and self._apscheduler:
-                for job_id in list(self._jobs_aps.values()):
-                    try:
-                        self._apscheduler.remove_job(job_id)
-                    except Exception:
-                        pass
-                self._jobs_aps.clear()
-                self._job_state.clear()
-            else:
-                for job in self._jobs_timer.values():
-                    job.stop()
-                self._jobs_timer.clear()
+            for job_id in list(self._jobs_aps.values()):
+                try:
+                    self._apscheduler.remove_job(job_id)
+                except Exception:
+                    pass
+            self._jobs_aps.clear()
+            self._job_state.clear()
             logger.info("[InProcessScheduler] all jobs cleared")

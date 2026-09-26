@@ -90,7 +90,7 @@
 - 状态：`migrating`（2026-08-18；P4 单轨写入完成，P5 DROP 因代码引用未完成而回滚）
 - canonical：一个事实只有一个生产计算者和一个写入者；Safety、Risk、Readiness、API、前端不得平行重算同一授权事实。
 - 当前：2026-08-10 已将账户/持仓 freshness blocker 收敛到 `live_reconciliation.evaluate_reconciliation_snapshot`，最终开仓 admission 与 readiness 复用同一结果；loop/readiness 只投影一个失败 blocker，`loop_status()` 不再通过读状态写入诊断事实。持仓对账、unknown execution、no-new-risk latch、generation 和 authority 校验仍保持独立 fail-closed。
-- 剩余：Safety/Generation/Execution Outcome/Governance/PG Job Queue 仍有发布期开关或旧兼容；客户端仍有少量旧 fact 字段迁移。
+- 剩余：Safety/Generation/Execution Outcome/Governance/PG Job Queue 仍有发布期开关或旧兼容；客户端仍有少量旧 fact 字段迁移。**2026-09-26 已删第一处兼容腿**：`backend/runtime/scheduler.py` 的 apscheduler 导入守卫 + `threading.Timer` 回退（514 → 284 行，见 meta 环条目第 2 项）；其余各项仍待逐条只读盘点后成批删除。
 - 退出：新路径通过各自运行门后，同批删除旧 authority、fallback、同义 blocker 和 pass-through wrapper。
 - 验证：调用链、静态入口扫描、合同测试、运行 snapshot 与 `git diff --stat`。
 
@@ -170,9 +170,9 @@
 - canonical：本清单为唯一退役对象列表；替代对象为 3–6 个生产信号的最小健康监控 + `open_quality_lightgbm` live shadow 链（本批已接入 `live_service._evaluate_open_quality_model_veto` 无策略分支，mode=`live_shadow`，纯观察 fail-open）。
 - 剩余（按退役顺序）：
   1. GP/canary 因子发现产线**保留**（2026-09-13 用户裁定：让发现链路完整走通到实盘或正常退役，不以削宽度为目标；同日闭环修复批见上方“因子发现闭环缺陷”）；本项退役对象改为产线内的重复实现本身（stage-priority 轮转、`source=='discovered'` 人口判据、config-only direction 已删）。supervisor 出生钩（`register_supervisor_shadow`，origin=supervisor隔离alpha/背压）保持，已真实产出（2026-09-13 advisory 回放 committed `auto_overprotection_relief.bfabfc4bed.v1`）；
-  2. `backtrader` / `APScheduler` 依赖声明（各仅 1 处引用）——二选一：删除声明或真实启用，不得长期双挂；
-  3. `backend/services/` 中 18 个 <120 行单调用方壳层——内联；
-  4. 451 个 reason code 收敛与 72 张 runtime 投影表并表——生产因子收缩后审计面同步收敛。
+  2. ~~`backtrader` / `APScheduler` 依赖声明~~ —— **2026-09-26 现查结案**：`backtrader` 根本不在 `requirements*.txt`（09-12 已核实，原措辞过时）；`APScheduler` 是**真实使用**（`backend/runtime/scheduler.py` 的 `BackgroundScheduler` + `live_service.py:3178/3286` 启停 + `/api/control/scheduler`），声明必须保留。可删的是它旁边那条不可达兼容腿：`HAS_APSCHEDULER` 导入守卫 + `_TimerJob`（threading.Timer 模式，含自写 cron 解析）+ `_jobs_timer` 全部 else 分支，本批已随 A 批删除（`scheduler.py` 514 → 284 行；调用方语义不变，唯一入口仍是 apscheduler）；`tests/test_scheduler.py` 的 fallback 用例与 `skipif` 同批删除，该文件 110 → 86 行；
+  3. `backend/services/` 中单调用方壳层——内联（2026-09-26 现查：**<120 行文件 19 个**，原写 18；"单调用方"判据尚未机械复核，内联前先出清单）；
+  4. reason code 收敛与 runtime 投影表并表（2026-09-26 现查：runtime schema **66 张表**，原写 72；reason code 数量原写 451，同样需先重新计数再定范围）——生产因子收缩后审计面同步收敛。
 - 退出：每批满足"替代已运行 + 针对性测试 + 全量回归绿 + 净删除为正"方可标记 resolved；shadow 写入分支的退出条件为模型 influence veto（demo_canary）稳定运行 ≥100 笔后复核是否保留为 fail-open 兜底。
 - 验证：`run_artifacts/baseline_comparison/`（A2 基线 PASS，2026-09-05）与 `run_artifacts/open_quality_validation/`（holdout AUC 0.40，过拟合实证，enforce 不准入）为本批决策留档。
 
