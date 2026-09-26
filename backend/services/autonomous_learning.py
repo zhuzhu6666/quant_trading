@@ -4868,7 +4868,9 @@ def _recommendation_already_materialized(conn, recommendation_id: str) -> bool:
         (
             """
             SELECT 1 FROM policy_suggestion
-            WHERE evidence_json LIKE ?
+            WHERE scope_type='parameter_template'
+              AND action='switch_parameter_template'
+              AND evidence_json LIKE ?
             LIMIT 1
             """,
             (needle,),

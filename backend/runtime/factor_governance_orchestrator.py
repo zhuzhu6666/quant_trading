@@ -684,9 +684,6 @@ class FactorGovernanceOrchestrator:
                 "[governance] mem after redundancy: %s",
                 self._mem_tag(),
             )
-            # Template recommendations are evidence handoffs only. Their
-            # specialist owns any mutation and its own V16 authorization.
-            actions.extend(self._apply_parameter_template_actions(catalog, run))
             expansion_preflight = self._expansion_preflight(
                 catalog,
                 cfg=cfg,
@@ -2774,98 +2771,6 @@ class FactorGovernanceOrchestrator:
             },
         )]
 
-    def _apply_parameter_template_actions(
-        self,
-        catalog: list[dict[str, Any]],
-        run: dict[str, Any],
-        *,
-        v16_command_id: str = "",
-    ) -> list[dict[str, Any]]:
-        """Publish template evidence and hand execution to autonomous learning.
-
-        Factor governance keeps its factor lifecycle/weight responsibility;
-        parameter-template activation is owned by ``autonomous_learning``.
-        Keeping this read path here is intentional: factor evidence can still
-        surface a template mismatch, but two agents must not race to activate
-        the same template or write the same runtime overlay.
-        """
-        actions: list[dict[str, Any]] = []
-        try:
-            from backend.services.parameter_templates import ParameterTemplateService
-
-            service = ParameterTemplateService()
-            recommendations = service.list_recommendations(limit=200)
-        except Exception as exc:
-            logger.debug("[factor_governance] parameter template recommendations unavailable: %s", exc)
-            return actions
-
-        by_factor = {str(item.get("factor_id") or ""): item for item in catalog}
-        for rec in recommendations:
-            factor_id = str(rec.get("factor_id") or "")
-            if not factor_id or factor_id not in by_factor:
-                continue
-            boundary = rec.get("boundary") or {}
-            scope = str(boundary.get("recommended_scope") or "")
-            target_template_id = str(rec.get("target_template_id") or "")
-            if not target_template_id:
-                continue
-            evidence = {
-                "recommendation_id": rec.get("recommendation_id"),
-                "factor_id": factor_id,
-                "target_template_id": target_template_id,
-                "boundary": boundary,
-                "execution_owner": "autonomous_learning",
-                "handoff_reason": "factor_governance_is_not_a_parameter_template_executor",
-            }
-            item = by_factor[factor_id]
-            if scope not in {"online_light", "offline_deep"}:
-                continue
-            current = service.get_active_template(
-                factor_id=factor_id,
-                regime_key=str(rec.get("regime_key") or ""),
-            ) or {}
-            if scope == "online_light" and str(current.get("template_id") or "") == target_template_id:
-                continue
-            action = (
-                "handoff_parameter_template_switch"
-                if scope == "online_light"
-                else "handoff_parameter_template_validation"
-            )
-            verdict = RiskVerdict(allowed=True, reason="handoff_only_no_mutation")
-            actions.append(self._audit_action(
-                run,
-                item,
-                action,
-                "delegated_to_autonomous_learning",
-                evidence,
-                verdict,
-                result={
-                    "target_template_id": target_template_id,
-                    "regime_key": str(rec.get("regime_key") or ""),
-                    "scope": scope,
-                    "v16_command_id": v16_command_id,
-                    "execution_owner": "autonomous_learning",
-                    "applied": False,
-                },
-            ))
-        return actions
-
-    def _submit_offline_template_validation(self, rec: dict[str, Any]) -> dict[str, Any]:
-        try:
-            from backend.jobs.manager import get_job_manager
-
-            params = {
-                "factor_id": str(rec.get("factor_id") or ""),
-                "template_id": str(rec.get("target_template_id") or ""),
-                "recommendation_context": {
-                    "source": "factor_governance_orchestrator",
-                    "recommendation_id": str(rec.get("recommendation_id") or ""),
-                },
-            }
-            job = get_job_manager().submit("parameter_template_validation", params)
-            return {"job_id": getattr(job, "job_id", "") or getattr(job, "id", ""), "params": params}
-        except Exception as exc:
-            return {"blocked": True, "reason": f"offline_validation_submit_failed:{exc}"}
 
     def _promote_shadow_candidates(
         self,

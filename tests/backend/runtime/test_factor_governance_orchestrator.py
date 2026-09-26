@@ -794,7 +794,6 @@ def test_run_cycle_does_not_claim_v16_without_expansion_work(monkeypatch):
         "build_report",
         lambda *_args, **_kwargs: {"group_count": 0, "groups": []},
     )
-    monkeypatch.setattr(orch, "_apply_parameter_template_actions", lambda *_args: [])
     monkeypatch.setattr(
         v16_gate.V16CommandGate,
         "authorize",

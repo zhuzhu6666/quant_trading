@@ -2300,6 +2300,21 @@ def test_parameter_template_recommendations_auto_materialize_and_dedupe(monkeypa
 
     monkeypatch.setattr(parameter_templates, "ParameterTemplateService", FakeParameterTemplateService)
 
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, evidence_json, status, created_at)
+            VALUES ('fgv_handoff', 'factor', 'ema_slope', 'handoff_parameter_template_switch',
+                    ?, 'delegated_to_autonomous_learning', 1.0)
+            """,
+            (json.dumps({"recommendation_id": "rec_online"}),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
     first = al.materialize_parameter_template_recommendations(db_path=db_path, limit=10)
     assert first["counts"]["suggested"] == 1
     assert calls == [("rec_online", "autonomous materialize from parameter template recommendation")]

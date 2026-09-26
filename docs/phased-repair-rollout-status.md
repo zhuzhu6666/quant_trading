@@ -276,6 +276,22 @@ Unresolved live evidence: ① **首次产线命中已取得（2026-09-26 晚）*
 Next batch: ①②③ 本批内已结案（见上），周一开盘只剩 ④⑤ 与 ① 的两项未证部分。① 剩余口径 = 该窗（`psv_apply_7ca7f6fa…`，17:49 CST 开）能否跨周期存活到出正向终判、且 `demo_mixed_terminal_inconclusive` 指纹停在 61 不再增长；同时盯 18:20 CST 那条开窗前生成的 approved 桥 `brain_bridge_d55f7c94…` 会不会落地成第二次切换把窗提前判死（它不在闸门拦截范围，属设计边界）。④ 等真实确认 amend；⑤ P3 取样后再定第四刀
 ```
 
+**本批（2026-09-26 深夜 A 批 + 参数模板自锁修复，提交 `3887e5a1` / `1372c66f` / 待提交的修复）**：
+
+```text
+Batch: 按用户裁定的建议顺序推进——A 批删除不可达的 scheduler 回退（纯删除）；随后把 B 批只读定位得到的参数模板自锁按用户裁定（删 handoff 写入）修掉
+Canonical authority: ① `InProcessScheduler` 的唯一后端 = `apscheduler.BackgroundScheduler`（`requirements.txt` 声明且已装，生产 `live_service.py:3178/3286` 启停）；② parameter_template 切换建议的唯一生产者 = `ParameterTemplateService.create_switch_suggestion`（learning 链经 `create_suggestion_from_recommendation` 落 `policy_suggestion(scope_type='parameter_template', action='switch_parameter_template')`），治理侧不再写"交接单"；`agent_authority.py` 该 surface 的 `delegated_execution_owner=autonomous_learning` 声明不变
+Deleted paths: ① `backend/runtime/scheduler.py` 的 `HAS_APSCHEDULER` 导入守卫 + `_TimerJob`（含自写 cron 解析 `_parse_interval_seconds`）+ `_jobs_timer` 全部 else 分支（514 → 284 行；apscheduler 分支只去缩进，逻辑逐字保留）；`tests/test_scheduler.py` 的 fallback 参数化用例与 `skipif`（110 → 86 行）；② `factor_governance_orchestrator._apply_parameter_template_actions` 整函数及其调用点（该函数除写 `handoff_parameter_template_switch` / `handoff_parameter_template_validation` 两条 `delegated_to_autonomous_learning` 建议外无其他产出，且两 action 全仓无消费者）与同文件死方法 `_submit_offline_template_validation`（零调用方）——共 −95 行；③ `autonomous_learning._recommendation_already_materialized` 的宽口径判据：`evidence_json LIKE '%<rec_id>%'`（全表任意提及即判"已物化"）收窄为 `scope_type='parameter_template' AND action='switch_parameter_template' AND evidence_json LIKE`
+Not added: 无新表 / 新索引 / 新缓存 / 新旋钮 / 新抽象；未新增第二套判据（窄化即替换原判据）；未动 `parameter_template_release_candidate` 与 `jobs` 两条既存检查
+Root cause（自锁，只读定位）：治理侧每周期为 `online_light` 推荐写 4,024 条 `handoff_parameter_template_switch`（另有 7,076 条 `_validation`，最新 09-26 15:25:52 UTC），其 `evidence_json` 顶层带跨周期稳定的 `recommendation_id`（现查样本 `ptr_ema_slope_ema_slope_conservative.v1_default`）；学习侧判"已物化"时全表 LIKE 命中的正是这些交接单 → 真物化腿永不执行（`skipped_existing=20/周期`）→ `parameter_template_switch_log` 恒 0 行。写单的人没人读，单子又让执行者以为自己做过
+Targeted verification: ① A 批定向 88 passed（`test_scheduler` / `test_backend_runtime_lifecycle` / `test_factor_autonomy_hardening` / `test_live_scheduler_jobs` / `test_live_service_tick`），存量 skipif 用例改为常跑；② 自锁修复：`tests/test_autonomous_learning.py::test_parameter_template_recommendations_auto_materialize_and_dedupe` 扩为三段（首轮物化 → 真实切换建议去重 → **新增**治理侧 handoff 行长在时仍须物化），红绿双证——把判据改回宽口径即红（`assert 0 == 1`，正是产线 `suggested=0` 症状），窄化后 59 passed；同族更宽定向 `test_autonomous_learning` + `tests/backend/runtime/` + `test_factor_cards_api` **160 passed**（`TMPDIR=/tmp`）
+Migration/OpenAPI/build: 无 schema 变更；无端点签名变更；`/api/control/scheduler` 只读 `running/jobs`、不暴露后端形态，无需改；被删的 handoff 写入无任何读侧消费者
+Remaining compatibility: ① `evolution_hourly` 的"静默块"从此消失——旧债登记册 2026-09-23/24 的性能条目所指 `_apply_parameter_template_actions` 已整函数删除，其历史耗时序列（244~416s → 30~39s）不再可比，后续该周期耗时只看整轮值；② 4,024 + 7,076 条历史 handoff 行保留在库（只读审计痕迹，无消费者），本批不清账
+Runtime verification: **未加载**——两处改动都在 learning worker 的代码路径（`factor_governance_orchestrator` 与 `autonomous_learning`），需受控重启 `quant-learning-worker`（可能连带 backend 以保持 release_identity 一致）后才生效，重启需用户授权；加载后首个完整 `evolution_hourly` 与 `autonomous_learning` 周期应看到：`parameter_template_auto_materialize` 的 `skipped_existing` 从 20 降为 0、`suggested` 出现非零，且不再新增 `handoff_parameter_template_*` 行（现表计数 4,024 / 7,076 应冻结）
+Unresolved live evidence: 首个真实 `switch_parameter_template` 落账（`parameter_template_switch_log` 非空 + `parameter_template_active` 非空）——那是该 surface 转 resolved 的判据，本批只解开自锁、不保证切换质量
+Next batch: 加载并现查上述两处；B 批剩余只读项（平行 authority 可删清单、lifecycle builtin fallback 入口确认）；C 批组件状态三读者收口
+```
+
 ## 3. 未完成 / 待复核证据
 
 1. **完整生命周期闭环**：S7.6 终验标准已达成并持续（基准 `trade_review_outcome full/1.0 46`，`2026-08-21 → 08-28`）；后续只做常态观察，当前计数、skip/rejected 双轨与 supervisor trace 分级以现查 `canonical_v2` 为准。
