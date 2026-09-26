@@ -93,6 +93,14 @@
 - canonical：一个事实只有一个生产计算者和一个写入者；Safety、Risk、Readiness、API、前端不得平行重算同一授权事实。
 - 当前：2026-08-10 已将账户/持仓 freshness blocker 收敛到 `live_reconciliation.evaluate_reconciliation_snapshot`，最终开仓 admission 与 readiness 复用同一结果；loop/readiness 只投影一个失败 blocker，`loop_status()` 不再通过读状态写入诊断事实。持仓对账、unknown execution、no-new-risk latch、generation 和 authority 校验仍保持独立 fail-closed。
 - 剩余：Safety/Generation/Execution Outcome/Governance/PG Job Queue 仍有发布期开关或旧兼容；客户端仍有少量旧 fact 字段迁移。**2026-09-26 已删第一处兼容腿**：`backend/runtime/scheduler.py` 的 apscheduler 导入守卫 + `threading.Timer` 回退（514 → 284 行，见 meta 环条目第 2 项）；其余各项仍待逐条只读盘点后成批删除。
+- **2026-09-27 只读盘点（B 批第二项，未改代码，可删清单如下）**：
+  1. **safety plane 的配置 off/shadow 腿**：`live_safety_plane.py:19` `SAFETY_MODES = {off, shadow, enforce}`，settings `live_safety_plane_v2_mode=enforce`；配置驱动分支在 `:151`（`force_shadow` 早退）、`:283`（`mode == "enforce" and not comparison_ready`）、`:296-299`（`status = "off" if mode == "off" else "shadow"`）。运行门已过（验收矩阵 Safety v2 enforce ✅ 且有仓 `governed_execute` 验证）。**可删**：配置只接受 `enforce` + 上述 off/shadow 分支；**必须保留**运行时 `forced_shadow` 降级态（那是 fail-closed 状态与持久化闩，不是发布开关）。触碰 Safety 判定路径 ⇒ 独立一批，且批内先跑本条的既有 safety 测试作等价基线。
+  2. **governance coordinator v2 旗标本身**：settings `governance_mutation_coordinator_v2_mode=enforce`，三个读者各带 `or "enforce"` 回退（`governance_control_plans.py:26`、`runtime_config_overlay.py:293`、`live_committed_policy.py:46`）。`off` 直连路径已删（验收矩阵 ✅），**可删**的是固定值旗标 + 三处回退表达式 + settings 键（内联为 enforce）。
+  3. **PG job queue 本地兼容：已收敛，无可删项**——全仓已无 `pg_job_queue_v2_enabled` 读者，SSoT 记"旧本地重任务兼容路径已删除"，`quant-job-worker` enabled/active；残留只是发布门模块里的历史 phase 名（与第 4 项合并处理）。
+  4. **`backend/services/phased_repair_release_gate.py` + `scripts/phased_repair_release_gate.py`**（按 phase 列 expected flags 的只读 preflight；09-17 发布准入判定已拆、降级为审计）：候选整模块删除，**但** `execution_outcome_fault_matrix.binding_paths` 把该模块绑进 attestation 哈希（`execution_outcome_fault_matrix.py:94`）⇒ 删除必须同批重取 fault matrix attestation，否则 attestation 与源码失配。
+  5. **Execution Outcome**：本轮未盘点出可删项——其发布期开关即 fault matrix 所绑定的执行路径本身，属合同面而非兼容层。
+  6. **scheduler 回退**：已删（2026-09-26，见上）。
+  排序建议：2 → 1 → 4（1 触碰 Safety 独立成批；4 需连带 attestation 重取）；3 无需动作。
 - 退出：新路径通过各自运行门后，同批删除旧 authority、fallback、同义 blocker 和 pass-through wrapper。
 - 验证：调用链、静态入口扫描、合同测试、运行 snapshot 与 `git diff --stat`。
 
@@ -101,7 +109,7 @@
 - 状态：`migrating`
 - canonical：`factor_lifecycle_state` + `factor_runtime_projection` + Factor Card `factor_admission_evidence.v1`；ACTIVE 必须经 typed Coordinator/V16、稳定 artifact、fresh health、loaded ack、至少 20 个独立成熟干净证据和受控 observing effect，成熟正向真实 effect 前不得扩权。
 - 当前：代码已使 legacy ACTIVE 缺完整准入证据时以 `legacy_evidence_incomplete` 排除选择，并由治理 owner 使用同 generation `demote_to_shadow`；context/gate 不投方向票，alpha 以 signed IC 校验方向。Evolution 只由 learning worker 在 `23,53` 运行，使用 `evolution_cycle_watermark.v1` 幂等 GP，并按 `QUANT_CANARY_EVALUATION_LIMIT` 背压；Backend 重任务注册和启动补偿已删除。
-- 剩余：运行态尚需应用代码/迁移并观察遗留 ACTIVE 的真实排除与退回；切入 typed lifecycle 前的 native builtin fallback、领域服务 coordinator-off 隔离兼容和静态开关关闭兼容仍在。不得通过数据库回填 ACTIVE 或伪造 PIT/walk-forward/cost/lineage/effect 证据。
+- 剩余：运行态尚需应用代码/迁移并观察遗留 ACTIVE 的真实排除与退回；切入 typed lifecycle 前的 native builtin fallback、领域服务 coordinator-off 隔离兼容和静态开关关闭兼容仍在。不得通过数据库回填 ACTIVE 或伪造 PIT/walk-forward/cost/lineage/effect 证据。**2026-09-27 只读现查（B 批第三项）：数据侧前置条件已满足**——`factor_runtime_projection` 中 `process_role='live_alpha' AND loaded=1` 的 **1,504 个因子 100% 都在 `factor_lifecycle_state` 有行**（LEFT JOIN 命中数相同，即**没有任何 live 加载因子靠"无 lifecycle 行的 fallback"存活**），其 stage 分布 ACTIVE 1,150 / QUARANTINED 195 / SHADOW 155 / RETIRED 4；`origin=builtin` 仅 15 行（SHADOW 7 / QUARANTINED 8、**ACTIVE 0**）。故本条剩余工作收敛为**纯代码侧删除**：审计 native builtin fallback 的读取者（现查 `factor_cards._factor_ids` 仍把进程内 `factor_registry` 与 `RegistryAdapter._meta` 的名字并进卡片面，属该族候选）并删除；批前需先跑等价性探针证明删除后卡片/健康/选择面输出不变。
 - 退出：现有 ACTIVE builtin 按 code-bound identity、V16、prepared、真实 loaded ack 和 fresh health 分批重入 lifecycle 后删除 builtin fallback；稳定 enforce 发布后删除领域服务的 generic restore 兼容。启动层的旧 template/supervisor/Registry restore 已删除；除六因子有界 Demo 经典种入外，不得用直接数据库回填 ACTIVE 绕过晋升证据。
 
 ## 2. 执行与运行时
