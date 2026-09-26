@@ -4870,6 +4870,7 @@ def _recommendation_already_materialized(conn, recommendation_id: str) -> bool:
             SELECT 1 FROM policy_suggestion
             WHERE scope_type='parameter_template'
               AND action='switch_parameter_template'
+              AND status <> 'rejected'
               AND evidence_json LIKE ?
             LIMIT 1
             """,

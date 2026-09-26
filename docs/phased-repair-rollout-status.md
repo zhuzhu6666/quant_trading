@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Last verified: 2026-09-27 00:25 CST（**参数模板自锁修复已加载并双向验证**：23:47:41 backend / 23:48:18 learning worker（用户授权），`release_identity.head=e72584d2`、`clean=true`、两端 `overlay hash=4af21662…` 一致、`recovery bootstrap attached 1 live positions after restart`；治理侧 23:53 轮 `evolution_hourly` **114.9s** 且 `handoff_parameter_template_*` 计数冻结在 4,024 / 7,076 ⇒ 不再写交接单；学习侧 00:12 轮 `parameter_template_auto_materialize` **`skipped_existing` 20 → 0、`suggested` 0 → 6** ⇒ 物化腿跑通。同时暴露下游两道闸（`job_enqueue_did_not_return_row` ×13 与 governor 判切换建议 `eligibility_contract_invalid` ×6），待下一批修；`observation_window_in_flight` 首次产线命中已取得。逐项证据与展开见 §2）
+> Last verified: 2026-09-27 00:25 CST（**参数模板自锁修复已加载并双向验证**：23:47:41 backend / 23:48:18 learning worker（用户授权），`release_identity.head=e72584d2`、`clean=true`、两端 `overlay hash=4af21662…` 一致、`recovery bootstrap attached 1 live positions after restart`；治理侧 23:53 轮 `evolution_hourly` **114.9s** 且 `handoff_parameter_template_*` 计数冻结在 4,024 / 7,076 ⇒ 不再写交接单；学习侧 00:12 轮 `parameter_template_auto_materialize` **`skipped_existing` 20 → 0、`suggested` 0 → 6** ⇒ 物化腿跑通。同时暴露下游两道闸（`job_enqueue_did_not_return_row` ×13 与 governor 判切换建议 `eligibility_contract_invalid` ×6），待下一批修；`observation_window_in_flight` 首次产线命中已取得。**2026-09-27 续：第一道闸（eligibility 契约）已修在代码侧（未加载，待受控重启），见 §2 本批**。逐项证据与展开见 §2）
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -288,9 +288,24 @@ Targeted verification: ① A 批定向 88 passed（`test_scheduler` / `test_back
 Migration/OpenAPI/build: 无 schema 变更；无端点签名变更；`/api/control/scheduler` 只读 `running/jobs`、不暴露后端形态，无需改；被删的 handoff 写入无任何读侧消费者
 Remaining compatibility: ① `evolution_hourly` 的"静默块"从此消失——旧债登记册 2026-09-23/24 的性能条目所指 `_apply_parameter_template_actions` 已整函数删除，其历史耗时序列（244~416s → 30~39s）不再可比，后续该周期耗时只看整轮值；② 4,024 + 7,076 条历史 handoff 行保留在库（只读审计痕迹，无消费者），本批不清账
 Runtime verification: **2026-09-26 23:47:41 backend / 23:48:18 learning worker 受控重启已加载**（用户授权；预检：无未收口 broker/governance intent、无 pending/running job、协调器空闲、三服务 active）；`/api/health` 的 `release_identity.head=e72584d2`（即本批修复提交）、`clean=true`（首次出现已提交工作区直接加载）、两端 `overlay restored hash=4af21662…` 一致（相对 16:13 的 `1f4ac096…` 变化来自 17:49 CST 那次受控切换的 governed mutation，非漂移）、`committed governance projection recovery attempted=100 current=100 degraded=0`、readiness projection `fresh`、`live loop started` + `recovery bootstrap attached 1 live positions after restart`、两单元 `NRestarts=0`；learning worker 启动日志出现 `[InProcessScheduler] add_job …` + `Scheduler started`，即 A 批删除回退后 apscheduler 路径在生产实跑。**验证①（治理侧）已通过**：23:53 轮 `evolution_hourly` 跑完（**114.9s**，对照 23:23 轮 155.8s），`handoff_parameter_template_validation` / `_switch` 计数**冻结在 7,076 / 4,024**、`MAX(created_at)` 仍是修复前的 15:25:52 UTC ⇒ 治理侧不再写交接单。**验证②（学习侧）已通过且暴露下游两道闸**：00:12 CST 轮 16:18:59 UTC 的 `parameter_template_auto_materialize` 事件为 `skipped_existing` **20 → 0**、`suggested` **0 → 6**、`offline_jobs` 1 ⇒ 物化腿真的执行了（自锁解除生效）。同时暴露：① `errors=13` 全部是 `job_enqueue_did_not_return_row`——生产 `idx_jobs_kind_idempotency` 是全量唯一索引而代码按部分索引（`WHERE idempotency_key <> ''`）写 ON CONFLICT，导致**同 kind 第二条空 key 入队必失败**（现查 `jobs` 表每 kind 至多 1 条空 key 行），是系统性缺口；② 6 条 `switch_parameter_template` 建议全部被 governor 判 `rejected: executable evidence eligibility version/fingerprint missing`（`governance_eligible=0`/`eligibility_contract_invalid`）——写入者用裸 INSERT 不带 eligibility 契约。两者详情与修复方向见 [legacy-debt-register.md](legacy-debt-register.md) V16 条目 2026-09-27 段
-Remaining compatibility: ① `evolution_hourly` 的"静默块"从此消失——旧债登记册 2026-09-23/24 的性能条目所指 `_apply_parameter_template_actions` 已整函数删除，其历史耗时序列（244~416s → 30~39s）不再可比，后续该周期耗时只看整轮值；② 4,024 + 7,076 条历史 handoff 行保留在库（只读审计痕迹，无消费者），本批不清账
 Unresolved live evidence: 首个真实 `switch_parameter_template` 落账（`parameter_template_switch_log` 非空 + `parameter_template_active` 非空）——本批解开自锁后该判据仍受上述两道闸阻挡，需先修 eligibility 契约与入队键；另：restart 冲突（`CanonicalV2ConflictError`，确定性事件 id × 墙钟 `event_ts`）若反复出现，值得单列一条幂等边界条目
 Next batch: 修上述两道闸（eligibility 契约优先，它是切换能否落账的直接前置；入队键同批修）；随后 B 批收尾（平行 authority 清单已出，见登记册）与 C 批组件状态三读者收口
+```
+
+**本批（2026-09-27 凌晨：parameter_template 切换建议 eligibility 契约，用户裁定"先修 eligibility 契约"）**：
+
+```text
+Batch: 修第一道闸——`switch_parameter_template` 建议的 eligibility 契约（写者补契约 + 物化去重判据排除 rejected）；入队键（jobs 索引口径）按用户裁定单列一批
+Canonical authority: eligibility 唯一计算者 = 建议写者 `ParameterTemplateService.create_switch_suggestion`，形状与 `position_supervisor_governance` advisory 车道同源（同一 `GOVERNANCE_ELIGIBILITY_VERSION`、同一 sha256 json sort_keys 口径）；读侧不新增判据——governor `research/learning/governor.py:589-601/:688-698` 与 `_suggestion_is_approved` 三列检查原样复用
+Deleted paths: `tests/test_factor_cards_api.py::_approve_parameter_template_suggestion`（手工把 `governance_eligible=1` + `'pytest-eligibility'` 指纹补进库的测试旁路，8 处调用点收敛为既有 governor `set_status`）——该旁路是"写者不做、测试代做"的产物，删除后写者契约成为建议合格的唯一来源
+Not added: 无新表 / 新列 / 新迁移 / 新开关 / 第二套判据；fingerprint 计算复用既有 `hashlib.sha256(json.dumps(..., sort_keys=True, default=str))` 形状，同一 fingerprint 兼作 `qualification_fingerprint` 生成确定性 suggestion_id（不新增随机 id 面）
+Root cause: 写者用裸 INSERT 只写 evidence/status，governor 要求的三列全空 ⇒ 经 `create_suggestion_from_recommendation` 物化出的每条切换建议天生 `eligibility_contract_invalid`（live 6/6 被拒）。第二面：物化去重判据 `_recommendation_already_materialized` 不排除 `rejected` ⇒ 被拒建议永久占住"已物化"判据，同一 recommendation 无法在契约修好后重新物化（6 条 live 拒绝行正落在此面）
+Targeted verification: ① `test_factor_cards_api.py::test_parameter_template_activation_syncs_runtime_signal_config` 落库即断四列（eligible=1 / version / 64 位 fingerprint / ineligible_reason 空）；红证：HEAD worktree（59f995e7）上跑新断言 `assert 0 == 1`（写者缺契约），当前树绿；② materialize 测试补第三段——把既有建议置 `rejected` 后重跑，`suggested` 回到 1（判据不排除 rejected 即红）；③ 定向 `test_factor_cards_api` + `test_autonomous_learning` **102 passed**，同族 `test_governance_eligibility_weighting` / `test_governance_contract_convergence` / `test_governance_mutation_coordinator` / `test_governance_control_plans` / `test_v16_brain_orchestrator` **60 passed**
+Migration/OpenAPI/build: 无 schema 变更（`runtime.policy_suggestion` 四列 supervisor 车道已在用，2026-09-25 只读枚举确认存在）；无端点签名变更；物化路径经 `create_switch_suggestion` 自动携带契约，无需调用方改动
+Remaining compatibility: 6 条被拒历史行保留（`governance_eligible=0` 审计痕迹）；去重判据排除 rejected 后它们不再挡重新物化，新建议 payload 含 `governance_eligibility` 块 ⇒ 确定性 id 与旧行不同，不复用旧 id
+Runtime verification: **未加载**——需用户授权的受控重启（learning worker；backend 无本批代码路径可不动，但如需 release_identity 一致可同批）。加载后现查口径：新一轮 `parameter_template_auto_materialize` 的 `suggested` 不再被 governor 判 `eligibility_contract_invalid`、`policy_suggestion` 出现 `governance_eligible=1` 的 `switch_parameter_template` 行、进而首个真实切换落账判据（`parameter_template_switch_log` 非空）
+Unresolved live evidence: 首个真实 `switch_parameter_template` 落账仍待验（未加载）；`offline_jobs` 入队键缺陷（`job_enqueue_did_not_return_row`）按裁定单列一批
+Next batch: 受控重启加载本批 + 现查 6 条建议能否进 approved/claim；随后修入队键（第二道闸）与 B 批收尾（平行 authority 清单见登记册）、C 批组件状态三读者收口
 ```
 
 ## 3. 未完成 / 待复核证据

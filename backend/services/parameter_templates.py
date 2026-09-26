@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -680,14 +681,43 @@ class ParameterTemplateService:
             if boundary.get("recommended_scope") == "online_light"
             else f"{factor_id} requires offline_deep before switching to {target['template_version']}"
         )
+        from backend.services.governance_eligibility import (
+            GOVERNANCE_ELIGIBILITY_VERSION,
+        )
+
+        scope_key = f"{factor_id}:{regime_key or 'default'}"
+        # Same shape the supervisor advisory lane writes: the fingerprint covers
+        # the evidence this switch rests on, so the governor can tell an eligible
+        # suggestion from one whose evidence changed underneath it.
+        eligibility_fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "schema_version": GOVERNANCE_ELIGIBILITY_VERSION,
+                    "evidence_class": "parameter_template_recommendation",
+                    "scope_type": "parameter_template",
+                    "scope_key": scope_key,
+                    "action": "switch_parameter_template",
+                    "evidence": payload,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        payload["governance_eligibility"] = {
+            "governance_eligible": True,
+            "governance_eligibility_version": GOVERNANCE_ELIGIBILITY_VERSION,
+            "governance_eligibility_fingerprint": eligibility_fingerprint,
+            "evidence_class": "parameter_template_recommendation",
+        }
         suggestion_id = deterministic_policy_suggestion_id(
             writer="parameter_templates",
             scope_type="parameter_template",
-            scope_key=f"{factor_id}:{regime_key or 'default'}",
+            scope_key=scope_key,
             action="switch_parameter_template",
             evidence=payload,
             status="proposed",
-            qualification_fingerprint=str(boundary.get("qualification_fingerprint") or ""),
+            qualification_fingerprint=eligibility_fingerprint,
             prefix="psg_parameter_template",
         )
         with self._conn() as conn:
@@ -696,16 +726,21 @@ class ParameterTemplateService:
                 """
                 INSERT INTO policy_suggestion
                 (suggestion_id, scope_type, scope_key, action, confidence, reason,
-                 evidence_json, status, created_at)
-                VALUES (?, 'parameter_template', ?, 'switch_parameter_template', ?, ?, ?, 'proposed', ?)
+                 evidence_json, status, governance_eligible,
+                 governance_eligibility_version, governance_eligibility_fingerprint,
+                 governance_ineligible_reason, created_at)
+                VALUES (?, 'parameter_template', ?, 'switch_parameter_template', ?, ?, ?,
+                        'proposed', 1, ?, ?, '', ?)
                 ON CONFLICT(suggestion_id) DO NOTHING
                 """,
                 (
                     suggestion_id,
-                    f"{factor_id}:{regime_key or 'default'}",
+                    scope_key,
                     0.55,
                     reason,
                     json.dumps(payload, ensure_ascii=False, default=str),
+                    GOVERNANCE_ELIGIBILITY_VERSION,
+                    eligibility_fingerprint,
                     now,
                 ),
             )
@@ -713,7 +748,7 @@ class ParameterTemplateService:
         return {
             "suggestion_id": suggestion_id,
             "scope_type": "parameter_template",
-            "scope_key": f"{factor_id}:{regime_key or 'default'}",
+            "scope_key": scope_key,
             "action": "switch_parameter_template",
             "status": "proposed",
             "evidence": payload,

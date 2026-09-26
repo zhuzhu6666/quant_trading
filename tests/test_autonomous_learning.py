@@ -2338,6 +2338,19 @@ def test_parameter_template_recommendations_auto_materialize_and_dedupe(monkeypa
     assert second["counts"]["skipped_existing"] == 1
     assert len(calls) == 1
 
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "UPDATE policy_suggestion SET status='rejected' WHERE suggestion_id='psg_existing'"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    third = al.materialize_parameter_template_recommendations(db_path=db_path, limit=10)
+    assert third["counts"]["suggested"] == 1
+    assert len(calls) == 2
+
 
 def test_auto_apply_position_supervisor_template_is_blocked_while_expansion_frozen(tmp_path):
     rc.reset_for_tests()
