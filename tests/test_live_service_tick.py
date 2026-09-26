@@ -852,13 +852,22 @@ def test_local_positions_initially_empty():
     assert live_service._local_positions == {}
 
 
-def test_track_local_position_adds_entry():
+def test_track_local_position_adds_entry(monkeypatch):
+    merged: list[tuple[int, dict]] = []
+    monkeypatch.setattr(
+        live_close_settlement,
+        "merge_recovery_position_meta",
+        lambda position_id, meta: merged.append((position_id, meta)),
+    )
     live_service._track_local_sl_tp(position_id=42, sl=4480.0, tp=4550.0)
     assert 42 in live_service._local_positions
     entry = live_service._local_positions[42]
     assert entry.position_id == 42
     assert entry.sl == 4480.0
     assert entry.tp == 4550.0
+    # The broker-confirmed stop has to reach the durable recovery cache too,
+    # not just the mirror that dies with the process.
+    assert merged == [(42, {"sl": 4480.0, "tp": 4550.0})]
 
 
 def test_process_tick_does_not_call_account_info_or_get_positions_synchronously(monkeypatch):

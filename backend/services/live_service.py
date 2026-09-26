@@ -1797,6 +1797,13 @@ def _track_local_sl_tp(position_id: int, sl: float, tp: float) -> None:
             tp=tp,
             updated_at=time.time(),
         )
+    # The in-process mirror is gone after a restart; the recovery row is what
+    # recovery reads back, so an amend that the broker confirmed has to land
+    # there too instead of leaving the open-time stop as the cache.
+    try:
+        live_close_settlement.merge_recovery_position_meta(position_id, {"sl": sl, "tp": tp})
+    except Exception as exc:
+        logger.debug("[live] recovery sl/tp mirror write failed pos={}: {}", position_id, exc)
 
 # ── 共享 live state 缓存 (live loop 周期更新, API/WS 只读) ────────────
 # audit 2026-06-08: 旧设计每次 WS 推送 / HTTP 轮询都打 broker,
