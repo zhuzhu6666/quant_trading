@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Last verified: 2026-09-26 23:40 CST（**监督治理环收敛 + 恢复行 SL/TP 回写两刀已加载并现查**：16:13:44 / 16:14:02 / 16:14:26 CST 三服务受控重启，backend 与 learning worker 同一 `overlay hash=1f4ac096…`、`committed governance projection recovery attempted=100 current=100 degraded=0`、`recovery bootstrap attached 1 live positions after restart`、`/api/health` 的 `release_identity.head=5cc93c59`（生产首次运行在已提交代码上；其后 `b21c3514`/`be4df82b` 为 docs-only，运行码与 HEAD 无实现差异）、三单元 `NRestarts=0`、无新闩无 quarantine 事件；闭市姿态保持 `degraded` + `broker_position_price_unknown`/`market_session_blocks_open`（设计内）。本批改动 = 同一控制表面只允许一条未收口观察窗（删 demo 的 mixed 即时终态化两条参数，收口交给既有 24h 观察钟；advisory 在 in-flight 时只记 `observation_window_in_flight`）+ broker 已确认止损回写恢复行 `recovery_meta_json.sl/tp`；定向 156 + 147 passed、全量回归 **3005 passed / 11 skipped**（= 基线 3004 + 本批新增 1）。未收口证据只剩 ①④⑤（② 观察窗能否停住并攒到可比样本、③ 09-25 占面临时桥的成对回收**已在 16:50 CST 只读复核中结案**，且 ③ 的"周末轮次早退未执行"前提作废）；① 的现查口径已收窄为一负一正两个可观察量，全部展开与数值见 §2 本批 `Unresolved live evidence`；⑤ `autonomous_learning` 同口径 294.9s → 623~635s 的 516s 未打点区域（已用只读探针排除 `list_recommendations` 本体：冷进程实测 9s），结论待开盘首轮 py-spy 活体取样；09-24 读侧两刀与更早批次快照追溯走 Git）
+> Last verified: 2026-09-27 00:00 CST（**参数模板自锁修复已受控重启加载并验证治理侧**：23:47:41 backend / 23:48:18 learning worker（用户授权），`release_identity.head=e72584d2`、`clean=true`、两端 `overlay hash=4af21662…` 一致、`recovery bootstrap attached 1 live positions after restart`；23:53 轮 `evolution_hourly` **114.9s** 且 `handoff_parameter_template_*` 计数冻结在 4,024 / 7,076 ⇒ 治理侧不再写交接单；学习侧 `parameter_template_auto_materialize` 的 `skipped_existing`/`suggested` 待 00:12 CST 轮回填。监督治理环收敛 + 恢复行 SL/TP 回写两刀仍为 2026-09-26 16:13~16:14 CST 加载、`head=5cc93c59`；`observation_window_in_flight` 首次产线命中已取得。逐项证据与展开见 §2）
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -276,7 +276,7 @@ Unresolved live evidence: ① **首次产线命中已取得（2026-09-26 晚）*
 Next batch: ①②③ 本批内已结案（见上），周一开盘只剩 ④⑤ 与 ① 的两项未证部分。① 剩余口径 = 该窗（`psv_apply_7ca7f6fa…`，17:49 CST 开）能否跨周期存活到出正向终判、且 `demo_mixed_terminal_inconclusive` 指纹停在 61 不再增长；同时盯 18:20 CST 那条开窗前生成的 approved 桥 `brain_bridge_d55f7c94…` 会不会落地成第二次切换把窗提前判死（它不在闸门拦截范围，属设计边界）。④ 等真实确认 amend；⑤ P3 取样后再定第四刀
 ```
 
-**本批（2026-09-26 深夜 A 批 + 参数模板自锁修复，提交 `3887e5a1` / `1372c66f` / 待提交的修复）**：
+**本批（2026-09-26 深夜 A 批 + 参数模板自锁修复，提交 `3887e5a1` / `1372c66f` / `e72584d2`）**：
 
 ```text
 Batch: 按用户裁定的建议顺序推进——A 批删除不可达的 scheduler 回退（纯删除）；随后把 B 批只读定位得到的参数模板自锁按用户裁定（删 handoff 写入）修掉
@@ -287,9 +287,10 @@ Root cause（自锁，只读定位）：治理侧每周期为 `online_light` 推
 Targeted verification: ① A 批定向 88 passed（`test_scheduler` / `test_backend_runtime_lifecycle` / `test_factor_autonomy_hardening` / `test_live_scheduler_jobs` / `test_live_service_tick`），存量 skipif 用例改为常跑；② 自锁修复：`tests/test_autonomous_learning.py::test_parameter_template_recommendations_auto_materialize_and_dedupe` 扩为三段（首轮物化 → 真实切换建议去重 → **新增**治理侧 handoff 行长在时仍须物化），红绿双证——把判据改回宽口径即红（`assert 0 == 1`，正是产线 `suggested=0` 症状），窄化后 59 passed；同族更宽定向 `test_autonomous_learning` + `tests/backend/runtime/` + `test_factor_cards_api` **160 passed**（`TMPDIR=/tmp`）
 Migration/OpenAPI/build: 无 schema 变更；无端点签名变更；`/api/control/scheduler` 只读 `running/jobs`、不暴露后端形态，无需改；被删的 handoff 写入无任何读侧消费者
 Remaining compatibility: ① `evolution_hourly` 的"静默块"从此消失——旧债登记册 2026-09-23/24 的性能条目所指 `_apply_parameter_template_actions` 已整函数删除，其历史耗时序列（244~416s → 30~39s）不再可比，后续该周期耗时只看整轮值；② 4,024 + 7,076 条历史 handoff 行保留在库（只读审计痕迹，无消费者），本批不清账
-Runtime verification: **未加载**——两处改动都在 learning worker 的代码路径（`factor_governance_orchestrator` 与 `autonomous_learning`），需受控重启 `quant-learning-worker`（可能连带 backend 以保持 release_identity 一致）后才生效，重启需用户授权；加载后首个完整 `evolution_hourly` 与 `autonomous_learning` 周期应看到：`parameter_template_auto_materialize` 的 `skipped_existing` 从 20 降为 0、`suggested` 出现非零，且不再新增 `handoff_parameter_template_*` 行（现表计数 4,024 / 7,076 应冻结）
-Unresolved live evidence: 首个真实 `switch_parameter_template` 落账（`parameter_template_switch_log` 非空 + `parameter_template_active` 非空）——那是该 surface 转 resolved 的判据，本批只解开自锁、不保证切换质量
-Next batch: 加载并现查上述两处；B 批剩余只读项（平行 authority 可删清单、lifecycle builtin fallback 入口确认）；C 批组件状态三读者收口
+Runtime verification: **2026-09-26 23:47:41 backend / 23:48:18 learning worker 受控重启已加载**（用户授权；预检：无未收口 broker/governance intent、无 pending/running job、协调器空闲、三服务 active）；`/api/health` 的 `release_identity.head=e72584d2`（即本批修复提交）、`clean=true`（首次出现已提交工作区直接加载）、两端 `overlay restored hash=4af21662…` 一致（相对 16:13 的 `1f4ac096…` 变化来自 17:49 CST 那次受控切换的 governed mutation，非漂移）、`committed governance projection recovery attempted=100 current=100 degraded=0`、readiness projection `fresh`、`live loop started` + `recovery bootstrap attached 1 live positions after restart`、两单元 `NRestarts=0`；learning worker 启动日志出现 `[InProcessScheduler] add_job …` + `Scheduler started`，即 A 批删除回退后 apscheduler 路径在生产实跑。**验证①（治理侧）已通过**：23:53 轮 `evolution_hourly` 跑完（**114.9s**，对照 23:23 轮 155.8s），`handoff_parameter_template_validation` / `_switch` 计数**冻结在 7,076 / 4,024**、`MAX(created_at)` 仍是修复前的 15:25:52 UTC ⇒ 治理侧不再写交接单。**验证②（学习侧）待 00:12 CST 轮**：`parameter_template_auto_materialize` 的 `skipped_existing` 应从 20 降为 0、`suggested` 出现非零（后台探针盯着，拿到即回填本行）。**重启副作用（已观测、设计内 fail-soft，非本批回归）**：23:48:24 出现一条 `CanonicalV2ConflictError field=payload_hash event_id=live_supervisor_evaluation_292777426_bars:233`——restart 后进程对刚收口的 bar 重算评估（bar 233 的评估在 23:45:38 已由旧进程写入），而该 payload 带墙钟 `event_ts` + 事件按 bar 确定性命名且不可变 ⇒ hash 必然不同；调用点已 try/except 转记 `supervisor_evaluation_record_failed`（`live_supervision_runtime.py:528`），旧评估保留、循环继续，仅 1 次无重复（16:13 与更早重启窗口 0 次）
+Remaining compatibility: ① `evolution_hourly` 的"静默块"从此消失——旧债登记册 2026-09-23/24 的性能条目所指 `_apply_parameter_template_actions` 已整函数删除，其历史耗时序列（244~416s → 30~39s）不再可比，后续该周期耗时只看整轮值；② 4,024 + 7,076 条历史 handoff 行保留在库（只读审计痕迹，无消费者），本批不清账
+Unresolved live evidence: 首个真实 `switch_parameter_template` 落账（`parameter_template_switch_log` 非空 + `parameter_template_active` 非空）——那是该 surface 转 resolved 的判据，本批只解开自锁、不保证切换质量；另：上述 restart 冲突若在后续重启中反复出现，值得单列一条"确定性事件 id + 墙钟 payload 字段"的幂等边界条目
+Next batch: 回填验证②；B 批剩余只读项（平行 authority 可删清单、lifecycle builtin fallback 入口确认）；C 批组件状态三读者收口
 ```
 
 ## 3. 未完成 / 待复核证据
