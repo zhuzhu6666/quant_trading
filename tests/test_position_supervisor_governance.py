@@ -40,6 +40,7 @@ def _create_db(path):
             status TEXT DEFAULT 'proposed',
             reviewed_at REAL DEFAULT 0.0,
             review_note TEXT DEFAULT '',
+            applied_mutation_id TEXT NOT NULL DEFAULT '',
             governance_eligible INTEGER NOT NULL DEFAULT 0,
             governance_eligibility_version TEXT NOT NULL DEFAULT '',
             governance_eligibility_fingerprint TEXT NOT NULL DEFAULT '',

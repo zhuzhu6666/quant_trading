@@ -9,6 +9,7 @@ from backend.runtime.factor_governance_orchestrator import _dumps
 from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
 from backend.services.factor_weight_change import FactorWeightChangeService
+from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.mutation_audit import record_api_mutation
 from backend.services.proposal_registry import ProposalRegistryService, ensure_proposal_registry_table
 from backend.services.v16_command_gate import V16CommandGate
@@ -337,6 +338,87 @@ def test_terminal_candidate_closes_only_its_own_unexecuted_bridge(tmp_path):
         conn.close()
     assert statuses["bridge-orphan"] == "superseded"
     assert statuses["bridge-live"] == "approved"
+
+
+def test_applied_bound_chain_releases_the_control_surface_for_successors(tmp_path):
+    """A finished chain must not block successors; a pending one still must.
+
+    The first supervisor template switch applied on 2026-09-21 and then held the
+    global supervisor surface for good: every successor review stayed
+    ``conflict_detected`` although the suggestion was already bound to a
+    committed mutation, so the lane stopped bridging.
+    """
+    db_path = _db(tmp_path)
+    candidates = BrainGovernanceCandidateService(db_path)
+    review_service = BrainGovernanceCandidateReviewService(db_path)
+    now = time.time()
+    scope_key = "position_supervisor:auto_overprotection_relief.aa33d5c8ad.v1"
+    for candidate_id in ("candidate-done", "candidate-successor"):
+        candidates.create_candidate(
+            candidate_id=candidate_id,
+            source_agent="v16_brain",
+            source_kind="supervisor_template_governance",
+            source_ref_type="test",
+            source_ref_id="test",
+            proposal_stage="brain_candidate",
+            capability_scope="supervisor_template_governance",
+            scope_type="position_supervisor_template",
+            scope_key=scope_key,
+            action="switch_position_supervisor_template",
+            confidence=0.8,
+            evidence_score=0.8,
+            risk_class="medium",
+            max_impact="medium",
+            evidence_refs={"posterior": "stable"},
+            now=now,
+        )
+    bridge_evidence = json.dumps(
+        {
+            "candidate_id": "candidate-done",
+            "source_agent": "v16_brain",
+            "bridge": {"command_owner": "v16_brain"},
+        }
+    )
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            """INSERT INTO policy_suggestion
+               (suggestion_id, scope_type, scope_key, action, confidence, status,
+                evidence_json, applied_mutation_id, governance_eligible,
+                governance_eligibility_version, governance_eligibility_fingerprint,
+                created_at)
+               VALUES (?, 'position_supervisor_template', ?,
+                       'switch_position_supervisor_template', 0.8, 'applied', ?,
+                       'gmut_applied_bound', 1, ?, 'fingerprint-1', ?)""",
+            ("bridge-applied", scope_key, bridge_evidence, GOVERNANCE_ELIGIBILITY_VERSION, now),
+        )
+        conn.execute(
+            "UPDATE brain_governance_candidate SET status='applied',"
+            " submitted_suggestion_id='bridge-applied' WHERE candidate_id='candidate-done'",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    review = review_service.review_candidate("candidate-successor", persist=False)
+    assert review["review"]["conflict"]["has_conflict"] is False
+
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            "UPDATE policy_suggestion SET status='approved', applied_mutation_id=''"
+            " WHERE suggestion_id='bridge-applied'",
+        )
+        conn.execute(
+            "UPDATE brain_governance_candidate SET status='awaiting_execution'"
+            " WHERE candidate_id='candidate-done'",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    review = review_service.review_candidate("candidate-successor", persist=False)
+    assert review["review"]["review_status"] == "conflict_detected"
 
 
 def test_proposal_registry_compacts_repeated_source_events_without_deleting_ledger(tmp_path):

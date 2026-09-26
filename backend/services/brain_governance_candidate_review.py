@@ -13,6 +13,7 @@ from backend.services._brain_helpers import connect as _connect, dumps as _dumps
 from backend.services.brain_governance_candidates import (
     BRIDGE_READY_STAGES,
     CANDIDATE_EXECUTION_PENDING_STATUSES,
+    CANDIDATE_TERMINAL_STATUSES,
     BrainGovernanceCandidateService,
     ensure_brain_governance_candidate_table,
     is_v16_candidate_bridge_evidence,
@@ -768,25 +769,34 @@ class BrainGovernanceCandidateReviewService:
         try:
             if not state_table_exists(conn, "policy_suggestion"):
                 return []
-            rows = _execute(
-                conn,
-                """
-                SELECT suggestion_id, scope_type, scope_key, action, confidence,
-                       evidence_json, status, reviewed_at, created_at
-                FROM policy_suggestion
-                WHERE status IN ('proposed', 'approved', 'applied')
-                  AND governance_eligible=1
-                  AND governance_eligibility_version=?
-                  AND COALESCE(governance_eligibility_fingerprint, '') <> ''
-                ORDER BY created_at DESC
-                LIMIT 200
-                """,
-                (GOVERNANCE_ELIGIBILITY_VERSION,),
-            ).fetchall()
+            rows = [
+                dict(raw_row)
+                for raw_row in _execute(
+                    conn,
+                    """
+                    SELECT suggestion_id, scope_type, scope_key, action, confidence,
+                           evidence_json, status, reviewed_at, created_at,
+                           applied_mutation_id
+                    FROM policy_suggestion
+                    WHERE status IN ('proposed', 'approved', 'applied')
+                      AND governance_eligible=1
+                      AND governance_eligibility_version=?
+                      AND COALESCE(governance_eligibility_fingerprint, '') <> ''
+                    ORDER BY created_at DESC
+                    LIMIT 200
+                    """,
+                    (GOVERNANCE_ELIGIBILITY_VERSION,),
+                ).fetchall()
+            ]
+            completed = self._completed_applied_chains(conn, rows)
             active = []
-            for raw_row in rows:
-                row = dict(raw_row)
+            for row in rows:
                 if str(row["status"] or "") not in ACTIVE_CONFLICT_STATUSES:
+                    continue
+                if str(row.get("suggestion_id") or "") in completed:
+                    # An applied, mutation-bound chain is finished: it must not
+                    # keep occupying the surface, or the supervisor template
+                    # lane (one global surface) can never bridge a successor.
                     continue
                 if str(row.get("scope_type") or "") == "position_supervisor_template":
                     evidence = _loads(row.get("evidence_json"), {})
@@ -799,6 +809,36 @@ class BrainGovernanceCandidateReviewService:
             return active
         finally:
             conn.close()
+
+    @staticmethod
+    def _completed_applied_chains(conn: Any, rows: list[dict[str, Any]]) -> set[str]:
+        """Suggestion ids whose change is already applied and bound.
+
+        Only a fully finished chain releases its surface: the suggestion must be
+        ``applied``, carry the committed mutation id, and its owning candidate
+        must be terminal.  Pending suggestions (``proposed``/``approved``) and
+        applied labels without a mutation keep occupying the surface.
+        """
+        applied_ids = [
+            str(row.get("suggestion_id") or "")
+            for row in rows
+            if str(row.get("status") or "") == "applied"
+            and str(row.get("applied_mutation_id") or "")
+        ]
+        if not applied_ids or not state_table_exists(conn, "brain_governance_candidate"):
+            return set()
+        terminal = sorted(CANDIDATE_TERMINAL_STATUSES)
+        found = _execute(
+            conn,
+            f"""
+            SELECT DISTINCT submitted_suggestion_id
+            FROM brain_governance_candidate
+            WHERE submitted_suggestion_id IN ({', '.join('?' for _ in applied_ids)})
+              AND status IN ({', '.join('?' for _ in terminal)})
+            """,
+            tuple(applied_ids) + tuple(terminal),
+        ).fetchall()
+        return {str(row["submitted_suggestion_id"] or "") for row in found}
 
     def _source_reliability(self) -> dict[str, dict[str, Any]]:
         conn = _connect(self.db_path, read_only=True)
