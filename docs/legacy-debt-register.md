@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-09-24 04:45（治理块根因批已随 03:54:14/03:56:02/03:58:56 CST 三服务受控重启加载：P1 `mem after list_recommendations` 1772~1778 → **663.1MB**、`autonomous_learning` 1248~1260 → **1098.1s**；P0 治理块因 posture `shadow_only`（09-23 18:24 起，replay 24h 过期）未被产线触发，收益仅由只读探针/等价性承载；剩余 ~1045s 经 py-spy 定位为三处同族读侧调用点。监督模板 lane 首条 application 09-21 落地并完成 24h effect 观察（`inconclusive`）；**applied 建议占面已按用户裁定的方案 a 修好判据并随 09:39:29 CST 三服务受控重启加载**（冲突集不再计入 completed chain；全量回归 3004 passed / 11 skipped；生产只读探针确认监督 surface 占面行 0，见 supervisor 条目 2026-09-23 段）；新增 `evolution_hourly` 周期耗时回归条目；此前 2026-09-19 11:45 为 C 批验收快照，追溯走 Git）
+> Last verified: 2026-09-26 16:52 CST（只读复核监督模板 lane 09-26 条目：占面临时桥已在 16:21:20 CST 周期成对收口、`position_supervisor_template` 全域 0 条非终态、12 条切换 application 全部终态，本登记册 §1 同名条目已按现查更新；本轮未改代码，故耗时/内存类数值仍为下列 09-24 快照。2026-09-24 04:45 快照：治理块根因批已随 03:54:14/03:56:02/03:58:56 CST 三服务受控重启加载：P1 `mem after list_recommendations` 1772~1778 → **663.1MB**、`autonomous_learning` 1248~1260 → **1098.1s**；P0 治理块因 posture `shadow_only`（09-23 18:24 起，replay 24h 过期）未被产线触发，收益仅由只读探针/等价性承载；剩余 ~1045s 经 py-spy 定位为三处同族读侧调用点。监督模板 lane 首条 application 09-21 落地并完成 24h effect 观察（`inconclusive`）；**applied 建议占面已按用户裁定的方案 a 修好判据并随 09:39:29 CST 三服务受控重启加载**（冲突集不再计入 completed chain；全量回归 3004 passed / 11 skipped；生产只读探针确认监督 surface 占面行 0，见 supervisor 条目 2026-09-23 段）；新增 `evolution_hourly` 周期耗时回归条目；此前 2026-09-19 11:45 为 C 批验收快照，追溯走 Git）
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归（active / migrating / monitoring / quarantined / regressed）。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
