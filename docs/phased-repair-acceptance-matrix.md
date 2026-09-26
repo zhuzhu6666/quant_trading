@@ -163,7 +163,7 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 - `pg_job_queue_enable → verify` ✅（PG durable queue、enabled/active worker、真实消费和 lease/recovery 测试）
 
 仍未完成：
-- supervisor 治理闭环 `governance_eligible matured`（需 10 笔真实干预，close/tighten 均可）
+- supervisor 治理闭环：数量门与 tighten 覆盖门已退役（2026-09-08），候选 review → V16 → Coordinator → application → effect 连续链已于 2026-09-21 首条落地并于 09-24~09-25 连续 12 次验收；**剩余门 = 单一控制表面在一个未收口观察窗内不再被二次切换（2026-09-26 起由 advisory 生产者在 `observation_window_in_flight` 上把关），且该窗最终产出一次正向 `reinforced` effect 使 `position_supervisor_selection.v1` 出现首个可入选候选**
 - P6 Demo 自治毕业（需 100 笔/30 天/2 regimes/PF 等）
 
 ## 9. 全量测试策略
