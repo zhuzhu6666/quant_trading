@@ -446,18 +446,18 @@ class BackendReadinessService:
                 "memory_integrity": memory_integrity,
             }
         try:
-            review_map = {
-                str(row.get("review_id") or ""): row
-                for row in iter_review_rows(conn, limit=0)
-            }
-            maturity_rows = []
-            for item in iter_counterfactual_rows(conn, limit=0, reverse=True):
-                value = dict(item)
-                review_id = str(value.get("review_id") or "")
-                review = review_map.get(review_id)
-                value["source_review_id"] = review_id if review is not None else ""
-                value["source_review_json"] = (review or {}).get("review_json") or {}
-                maturity_rows.append(value)
+            # Only the contamination verdict per review is consumed below.  Holding
+            # every canonical review row kept each 60KB+ review payload resident for
+            # the whole refresh, on top of the counterfactual history.
+            review_contamination: dict[str, bool] = {}
+            for row in iter_review_rows(conn, limit=0):
+                review_id = str(row.get("review_id") or "")
+                if not review_id:
+                    continue
+                review_contamination[review_id] = review_has_system_contamination(
+                    row.get("review_json") or {}
+                )
+            maturity_rows = iter_counterfactual_rows(conn, limit=0, reverse=True)
             canary_started_at = 0.0
             canary_suggestion_id = ""
             canary_template_id = ""
@@ -509,9 +509,10 @@ class BackendReadinessService:
                 close_ts = _safe_float(item.get("close_ts"))
                 eligible = bool(maturity.get("governance_eligible"))
                 counterfactual_invalidated = bool((evidence or {}).get("evidence_invalidated"))
+                review_id = str(item.get("review_id") or "")
                 source_review_invalid = (
-                    not str(item.get("source_review_id") or "")
-                    or review_has_system_contamination(item.get("source_review_json") or {})
+                    review_id not in review_contamination
+                    or review_contamination[review_id]
                 )
                 if counterfactual_invalidated:
                     invalidated_counterfactuals += 1

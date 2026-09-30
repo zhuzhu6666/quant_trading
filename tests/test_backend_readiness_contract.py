@@ -470,6 +470,96 @@ def test_learning_repair_tracks_active_applied_supervisor_cohort(tmp_path):
     assert status["checks"]["canary_sample_count"] is True
 
 
+def test_learning_repair_excludes_system_contaminated_review_from_canary(tmp_path):
+    db_path = tmp_path / "state.db"
+    candidate_started_at = 1_700_000_000.0
+    close_ts = candidate_started_at + 3600
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, status, created_at)
+            VALUES ('canary_1', 'position_supervisor_template', 'position_supervisor:test.v1',
+                    'switch_position_supervisor_template', 0.9, 'approved', ?)
+            """,
+            (candidate_started_at,),
+        )
+        record_review(
+            conn,
+            review_id="review_contaminated",
+            trade_id="trade_0",
+            position_id="position_contaminated",
+            review={
+                "position_id": "position_contaminated",
+                "close_ts": close_ts,
+                "system_issue_context": {
+                    "system_contaminated": True,
+                    "contaminates_learning": True,
+                },
+            },
+            created_at=close_ts,
+        )
+        record_supervisor_trace_event(
+            conn,
+            trace_id="trace_0",
+            event_ts=close_ts - 60,
+            payload={
+                "trace_id": "trace_0",
+                "position_id": "position_contaminated",
+                "template_id": "position_supervisor:test.v1",
+                "stage": "learning_shadow",
+                "outcome": "shadow",
+                "execution_status": "observation_only",
+                "execution_reason": "learning_worker_candidate_replay:canary_1",
+                "trace_integrity": "recovered",
+                "event_ts": close_ts - 60,
+            },
+        )
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf_0",
+            review_id="review_contaminated",
+            event_ts=close_ts,
+            payload={
+                "counterfactual_id": "cf_0",
+                "review_id": "review_contaminated",
+                "position_id": "position_contaminated",
+                "close_ts": close_ts,
+                "evidence": {
+                    "regime": "trend",
+                    "maturity": {
+                        "status": "governance_ready",
+                        "governance_eligible": True,
+                    },
+                },
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    rc.replace(
+        rc.RuntimeConfig(
+            supervisor_canary_mature_trade_count=1,
+            supervisor_counterfactual_governance_horizon_minutes=60,
+        )
+    )
+    try:
+        status = BackendReadinessService(db_path=db_path)._learning_repair_status()
+    finally:
+        rc.reset_for_tests()
+
+    assert status["canary"]["shadow_position_count"] == 1
+    assert status["canary"]["mature_trade_count"] == 0
+    assert status["invalid_evidence_count"] == 1
+    assert status["checks"]["no_invalidated_active_evidence"] is False
+    assert status["checks"]["counterfactual_maturity"] is False
+    assert status["ok"] is False
+
+
 def test_readiness_stability_status_reports_phase_h_guards(tmp_path):
     db_path = tmp_path / "state.db"
     persist_runtime_config_snapshot({"risk_per_trade": 0.01}, source="test", db_path=db_path)

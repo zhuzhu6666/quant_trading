@@ -901,7 +901,7 @@ def _flatten_canonical_event(conn: Any, row: Any, event_type: str) -> dict[str, 
     return result
 
 
-def _iter_canonical_payload_events(
+def _stream_canonical_payload_events(
     conn: Any,
     event_type: str,
     *,
@@ -909,10 +909,16 @@ def _iter_canonical_payload_events(
     limit: int = 0,
     reverse: bool = True,
     filters: Mapping[str, str] | None = None,
-) -> list[dict[str, Any]]:
-    """Read and flatten one canonical event stream without another source."""
+) -> Iterator[dict[str, Any]]:
+    """Flatten one canonical event stream lazily, in the same order and cut-off.
+
+    Every flattened row carries a decoded payload, so a consumer that only needs
+    aggregates must be able to reduce as it reads instead of holding the whole
+    immutable history.  Yields exactly what ``_iter_canonical_payload_events``
+    collects.
+    """
     if not _canonical_ready(conn):
-        return []
+        return
     expected = {str(key): str(value) for key, value in (filters or {}).items() if value not in (None, "")}
     direction = "DESC" if reverse else "ASC"
     bound = f" LIMIT {int(limit)}" if limit and int(limit) > 0 and not expected else ""
@@ -931,17 +937,39 @@ def _iter_canonical_payload_events(
         ),
         tuple(query_params),
     ).fetchall()
-    out: list[dict[str, Any]] = []
+    emitted = 0
     for row in rows:
         flattened = _flatten_canonical_event(conn, row, event_type)
         if flattened is None:
             continue
         if any(str(flattened.get(key) or "") != value for key, value in expected.items()):
             continue
-        out.append(flattened)
-        if limit and int(limit) > 0 and len(out) >= int(limit):
-            break
-    return out
+        yield flattened
+        emitted += 1
+        if limit and int(limit) > 0 and emitted >= int(limit):
+            return
+
+
+def _iter_canonical_payload_events(
+    conn: Any,
+    event_type: str,
+    *,
+    entity_type: str = "",
+    limit: int = 0,
+    reverse: bool = True,
+    filters: Mapping[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Read and flatten one canonical event stream without another source."""
+    return list(
+        _stream_canonical_payload_events(
+            conn,
+            event_type,
+            entity_type=entity_type,
+            limit=limit,
+            reverse=reverse,
+            filters=filters,
+        )
+    )
 
 
 def iter_parameter_template_lifecycle_rows(
@@ -1110,12 +1138,15 @@ def iter_counterfactual_rows(
             if flattened is not None
         ]
     else:
-        rows = _iter_canonical_payload_events(
+        rows = _stream_canonical_payload_events(
             conn,
             "counterfactual_review",
             # A counterfactual can have multiple immutable maturity versions.  A
             # consumer sees only the newest version for each logical id; apply the
-            # requested limit after that deduplication.
+            # requested limit after that deduplication.  Deduplicating while
+            # streaming keeps only those newest versions decoded instead of
+            # flattening every historical version first; the unfiltered read has
+            # no lineage edge to push the review_id narrowing down to.
             limit=0,
             reverse=reverse,
         )
