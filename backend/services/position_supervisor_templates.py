@@ -17,6 +17,17 @@ DEFAULT_TEMPLATE_ID = "position_supervisor:default.v1"
 CONSERVATIVE_TEMPLATE_ID = "position_supervisor:conservative.v1"
 PROFIT_PROTECTION_TEMPLATE_ID = "position_supervisor:profit_protection.v1"
 
+# A switch application only becomes the generated-template source once it has
+# been committed.  This is the one status set that may supply a binding
+# snapshot, and it is handed to LearningApplicationStore so the store filters on
+# the indexed ``status`` column instead of parsing every details_json blob.
+BINDING_APPLICATION_STATUSES = (
+    "applied",
+    "observing",
+    "reinforced",
+    "mixed",
+)
+
 # Single source of truth for the fail-closed fallback used when a
 # template or frozen binding snapshot omits min_thesis_break_seconds.
 # Matches default.v1.thresholds.min_thesis_break_seconds.
@@ -562,15 +573,16 @@ def _generated_templates_from_state(db_path: str | Path | None = None) -> list[d
         count = 0
         # Lean store already merged details_json into each dict (scope_type,
         # scope_key, action, status all live in the parsed details blob).
-        for app in store.iter_applications(scope_type="position_supervisor_template"):
+        # ``BINDING_APPLICATION_STATUSES`` is handed to the store so the rows
+        # this loop discards anyway are never fetched or parsed: an unfiltered
+        # read parses every details_json blob in learning_application_log, and
+        # this function is reached per sample row from the learning cycle and
+        # per open decision from the live pipeline.
+        for app in store.iter_applications(
+            scope_type="position_supervisor_template",
+            statuses=BINDING_APPLICATION_STATUSES,
+        ):
             if str(app.get("action") or "") != "switch_position_supervisor_template":
-                continue
-            if str(app.get("status") or "") not in (
-                "applied",
-                "observing",
-                "reinforced",
-                "mixed",
-            ):
                 continue
             payloads.append(app)
             count += 1
@@ -683,16 +695,14 @@ def latest_applied_position_supervisor_template_id(
         store = LearningApplicationStore(path)
         row: dict[str, Any] | None = None
         # Lean store merges details_json into each dict, so action/status/
-        # scope_key/mutation_id all come from the parsed details blob.
-        for app in store.iter_applications(scope_type="position_supervisor_template"):
+        # scope_key/mutation_id all come from the parsed details blob.  The
+        # status narrowing is pushed into the query for the same reason as in
+        # ``_generated_templates_from_state``.
+        for app in store.iter_applications(
+            scope_type="position_supervisor_template",
+            statuses=BINDING_APPLICATION_STATUSES,
+        ):
             if str(app.get("action") or "") != "switch_position_supervisor_template":
-                continue
-            if str(app.get("status") or "") not in (
-                "applied",
-                "observing",
-                "reinforced",
-                "mixed",
-            ):
                 continue
             row = app
             break

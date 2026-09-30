@@ -279,22 +279,38 @@ class LearningApplicationStore:
         scope_type: str | None = None,
         scope_key: str | None = None,
         limit: int | None = None,
+        statuses: tuple[str, ...] | list[str] | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Iterate applications newest-first, optionally filtered by scope.
 
         ``limit`` bounds the number of raw rows scanned (mirrors the ORDER BY
         created_at DESC / LIMIT n shape callers previously used).
+
+        ``statuses`` narrows on the indexed ``status`` column inside the query.
+        ``scope_type``/``scope_key`` have no column to filter on — they live
+        inside ``details_json`` — so they are still applied per row, which means
+        an unfiltered read parses every ``details_json`` blob in the table.  A
+        caller that already discards most rows by status should pass that same
+        predicate here instead of paying for the rows it drops.
         """
         conn = self._conn(read_only=True)
         try:
             sql = (
                 "SELECT application_id, run_id, source, status, details_json, "
                 "created_at, updated_at FROM learning_application_log "
-                "ORDER BY created_at DESC, updated_at DESC"
             )
+            params: tuple[Any, ...] = ()
+            if statuses:
+                placeholders = ", ".join("?" for _ in statuses)
+                sql += f"WHERE status IN ({placeholders}) "
+                params = tuple(str(item) for item in statuses)
+            sql += "ORDER BY created_at DESC, updated_at DESC"
             if limit is not None:
                 sql += f" LIMIT {int(limit)}"
-            rows = conn.execute(self._sql(sql)).fetchall()
+            if params:
+                rows = conn.execute(self._sql(sql), params).fetchall()
+            else:
+                rows = conn.execute(self._sql(sql)).fetchall()
             for row in rows:
                 details = _loads(row["details_json"], {})
                 if scope_type is not None and str(details.get("scope_type") or "") != scope_type:
