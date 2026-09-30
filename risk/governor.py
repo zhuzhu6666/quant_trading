@@ -33,6 +33,56 @@ class GovernorVerdict:
     suggestion: str = ""
 
 
+# ── live-only 门边界 ────────────────────────────────────────────────────────
+# 一个拒绝 reason 属于 "live state only", 当且仅当产生它的那道门读取了
+# replay 无法重建的运行态输入。replay 只用 canonical 事实重算决策; 下面这些
+# 输入只存在于运行中的进程 (当日的计数器与会话时钟、活体连接与熔断、宿主机
+# 健康), 因此 live 拒绝而重算放行是**缺输入**, 不是风控策略漂移。
+#
+# 把这类拒绝当成 risk policy disagreement 会让每次治理 replay 都降级到 C
+# (2026-09-13 首次: 80 条里 39 cooldown + 5 threshold + 3 loss-streak;
+#  2026-09-30 再次: 10 条 daily_trade_limit), 进而 replay_admission 不放行,
+# 已批准的因子权重变更全部 blocked_by_replay。
+#
+# 这份声明放在门旁边, 且每条写明依赖的运行态输入, 是为了让新增门必须交代它
+# 读什么; tests/test_replay_release_evidence_contract.py 用真实的 allow_trade
+# 行为断言每道 live-only 门都被归类, 漏登记会直接红。
+# 只有读取配置/派生指标的拒绝 (如 force_dry_run) 不在此列。
+LIVE_STATE_ONLY_DENIAL_INPUTS: dict[str, str] = {
+    # RiskGovernor.allow_trade —— GovernorState 活体字段
+    "circuit_broken": "GovernorState.circuit_broken",
+    "loop_not_running": "GovernorState.loop_running",
+    "bridge_disconnected": "GovernorState.bridge_connected",
+    "drawdown_too_high": "GovernorState.drawdown_pct",
+    "consecutive_losses": "GovernorState.consecutive_losses",
+    "loss_cooldown_active": "GovernorState.consecutive_losses + seconds_since_last_trade",
+    "daily_loss_limit": "GovernorState.daily_loss_pct",
+    "daily_trade_limit": "GovernorState.daily_trades",
+    "data_lag": "GovernorState.data_lag_seconds",
+    "disk_space_critical": "GovernorState.extra['runtime_health']",
+    # RiskPolicyService —— replay 传入的 context 键在重算里恒为空
+    "supervisor_reentry_cooldown": "context['supervisor_reentry_block']",
+    "learning_same_direction_cooldown": "context entry-cluster same-direction clock",
+    "learning_weak_signal_threshold": "context learned entry threshold",
+}
+
+# 门产出动态 reason 时按前缀归类 (loss_streak_<verdict.reason>)。
+LIVE_STATE_ONLY_DENIAL_PREFIXES: dict[str, str] = {
+    "loss_streak_": "GovernorState.daily_loss_pct + extra['loss_streak_ladder']",
+}
+
+
+def live_state_only_denial_input(reason: str) -> str | None:
+    """该拒绝 reason 依赖的运行态输入; 不依赖活体状态则返回 None。"""
+    text = str(reason or "")
+    if text in LIVE_STATE_ONLY_DENIAL_INPUTS:
+        return LIVE_STATE_ONLY_DENIAL_INPUTS[text]
+    for prefix, source in LIVE_STATE_ONLY_DENIAL_PREFIXES.items():
+        if text.startswith(prefix):
+            return source
+    return None
+
+
 @dataclass
 class GovernorState:
     """Governor 决策时读取的外部状态快照."""

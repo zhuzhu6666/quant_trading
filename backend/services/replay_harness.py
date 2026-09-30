@@ -193,23 +193,13 @@ def _verdict_signature(verdict: dict[str, Any]) -> tuple[Any, str]:
     return verdict.get("allowed"), str(verdict.get("reason") or "")
 
 
-# Live verdicts denied by gates that depend on live-only state which the replay
-# cannot reconstruct: the supervisor reentry cooldown clock, the entry-cluster
-# same-direction cooldown clock, the session loss streak and the learned entry
-# threshold.  A live denial from one of these is
-# missing state, not evidence that the offline recompute diverges.  Counting it
-# as a disagreement forced every governance replay to grade C (2026-09-13:
-# 39 cooldown + 5 threshold + 3 loss-streak denials out of 80 decisions), which
-# in turn left `replay_admission.allowed=false` and blocked the application of
-# every approved factor weight suggestion with `blocked_by_replay`.
-LIVE_STATE_ONLY_DENIAL_REASONS = frozenset(
-    {
-        "supervisor_reentry_cooldown",
-        "learning_same_direction_cooldown",
-        "loss_cooldown_active",
-        "learning_weak_signal_threshold",
-    }
-)
+# Live verdicts denied by gates that depend on live-only state the replay cannot
+# reconstruct.  The classification itself is owned by risk/governor.py — the
+# module that implements the gates — so a gate added there has to declare the
+# runtime input it reads instead of this consumer silently disagreeing with it.
+# See LIVE_STATE_ONLY_DENIAL_INPUTS there for why a live denial through one of
+# those gates is missing state rather than policy divergence.
+from risk.governor import live_state_only_denial_input  # noqa: E402
 
 
 def _is_live_state_only_denial(live_sig: tuple[Any, str], replay_sig: tuple[Any, str]) -> bool:
@@ -217,7 +207,7 @@ def _is_live_state_only_denial(live_sig: tuple[Any, str], replay_sig: tuple[Any,
     return bool(
         not live_sig[0]
         and replay_sig[0]
-        and str(live_sig[1] or "") in LIVE_STATE_ONLY_DENIAL_REASONS
+        and live_state_only_denial_input(live_sig[1]) is not None
     )
 
 

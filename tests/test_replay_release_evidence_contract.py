@@ -292,6 +292,77 @@ def test_live_state_only_denial_is_not_a_replay_disagreement():
     assert grade == "A"
 
 
+def test_every_live_only_allow_trade_gate_is_classified():
+    """A gate added to allow_trade must declare the runtime input it reads.
+
+    The 2026-09-13 fix enumerated four cooldown/threshold reasons; the next
+    live-only gate to fire (``daily_trade_limit``, 2026-09-30) was missed and
+    put the replay back to grade C. Driving the real ``allow_trade`` with one
+    tripped field per gate makes an unclassified gate fail here instead of
+    silently degrading every governance replay.
+    """
+    from backend.services.replay_harness import _is_live_state_only_denial
+    from risk.governor import GovernorState, RiskGovernor, live_state_only_denial_input
+
+    def governor() -> RiskGovernor:
+        # Thresholds no default field can reach, so each case trips one gate.
+        return RiskGovernor(
+            max_drawdown_pct=99.0,
+            max_consecutive_losses=99,
+            max_daily_loss_pct=99.0,
+            max_daily_trades=99,
+            min_bridge_uptake=True,
+            data_lag_max_seconds=99.0,
+            loss_cooldown_after_losses=0,
+            loss_cooldown_bars=0,
+            circuit_breaker_bypass=False,
+        )
+
+    cases = {
+        "circuit_broken": {"circuit_broken": True},
+        "loop_not_running": {"loop_running": False},
+        "bridge_disconnected": {"bridge_connected": False},
+        "drawdown_too_high": {"drawdown_pct": 100.0},
+        "consecutive_losses": {"consecutive_losses": 100},
+        "loss_cooldown_active": {
+            "consecutive_losses": 100,
+            "timeframe_seconds": 300,
+            "seconds_since_last_trade": 10,
+            "extra": {"loss_cooldown_after_losses": 2, "loss_cooldown_bars": 3},
+        },
+        "daily_loss_limit": {"daily_loss_pct": 100.0},
+        "daily_trade_limit": {"daily_trades": 100},
+        "data_lag": {"data_lag_seconds": 100000.0},
+        "disk_space_critical": {
+            "extra": {
+                "runtime_health": {
+                    "system_health": {"component_status": {"disk_space": "critical"}}
+                }
+            }
+        },
+    }
+    for expected_reason, fields in cases.items():
+        verdict = governor().allow_trade(GovernorState(**fields))
+        assert verdict.allowed is False, expected_reason
+        assert verdict.reason == expected_reason
+        assert live_state_only_denial_input(verdict.reason) is not None, expected_reason
+        assert _is_live_state_only_denial(
+            (False, verdict.reason), (True, "ok")
+        ) is True, expected_reason
+
+    # A config-only denial is not live state: the replay sees the same config.
+    dry = governor()
+    dry.set_dry_run(True)
+    forced = dry.allow_trade(GovernorState())
+    assert forced.reason == "force_dry_run"
+    assert live_state_only_denial_input(forced.reason) is None
+    assert _is_live_state_only_denial((False, forced.reason), (True, "ok")) is False
+
+    # Dynamic reason from the loss-streak ladder is classified by prefix.
+    assert live_state_only_denial_input("loss_streak_session_locked") is not None
+    assert live_state_only_denial_input("max_exposure") is None
+
+
 def test_unreconstructible_volume_denial_is_not_a_replay_disagreement():
     """Both sides deny but the recompute never reached a gate.
 
