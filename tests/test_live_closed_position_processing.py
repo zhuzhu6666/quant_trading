@@ -34,6 +34,7 @@ def _runtime(**overrides):
         "policy_suggester": None,
         "build_trade_review_payload": lambda **kwargs: kwargs,
         "mark_recovery_closed": lambda *_args, **_kwargs: None,
+        "release_pending_entry_protection": lambda *_args, **_kwargs: True,
         "entry_scores": {},
         "entry_decisions": {},
         "pending_open_attach_until": {},
@@ -206,6 +207,7 @@ def test_cleanup_returns_projection_failure_but_always_clears_local_state():
     scores = {7: 0.5}
     decisions = {7: "entry-7"}
     pending = {7: 120.0}
+    released = []
 
     def fail_projection(*_args, **_kwargs):
         raise RuntimeError("postgres unavailable")
@@ -219,6 +221,9 @@ def test_cleanup_returns_projection_failure_but_always_clears_local_state():
         factor_contributions={},
         runtime=_runtime(
             mark_recovery_closed=fail_projection,
+            release_pending_entry_protection=(
+                lambda pid, **kwargs: released.append((pid, kwargs)) or True
+            ),
             entry_scores=scores,
             entry_decisions=decisions,
             pending_open_attach_until=pending,
@@ -229,3 +234,6 @@ def test_cleanup_returns_projection_failure_but_always_clears_local_state():
     assert scores == {}
     assert decisions == {}
     assert pending == {}
+    assert released == [
+        (7, {"close_reason": "broker_close", "close_ts": 90.0, "total_pnl": 4.25})
+    ]

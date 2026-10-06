@@ -133,6 +133,50 @@ def release_entry_protection_pending_latch(
         return latch
 
 
+def release_entry_protection_pending_latch_after_broker_close(
+    position_id: int,
+    *,
+    close_reason: str,
+    close_ts: float,
+    total_pnl: float,
+    release_latch_cause: Any,
+) -> bool:
+    """Release the pending cause once the broker proves the position is gone.
+
+    ``release_entry_protection_pending_latch`` is the only other release site
+    and it needs the amended SL/TP echoed back by a fresh reconcile.  When the
+    broker already reports the position as fully closed with an authoritative
+    close deal there is no residual new risk left to block, so the cause must
+    not outlive the position.  Without this the cause survives restarts by
+    design and keeps ``no_new_risk`` latched with no remaining position.
+    """
+
+    pid = int(position_id or 0)
+    if pid <= 0:
+        return False
+    try:
+        release_latch_cause(
+            cause="entry_protection_pending",
+            cause_id=str(pid),
+            reason="position_closed_at_broker_no_residual_new_risk",
+            actor="system:position_close",
+            correlation_id=str(pid),
+            evidence={
+                "position_id": pid,
+                "close_reason": str(close_reason or ""),
+                "close_ts": float(close_ts or 0.0),
+                "total_pnl": float(total_pnl or 0.0),
+                "broker_position_absent": True,
+                "authoritative_close_deal": True,
+            },
+        )
+    except Exception:
+        # A failed release must never fail closed-position attribution. The
+        # latch stays active and blocks new risk, which is the safe direction.
+        return False
+    return True
+
+
 def _append_outbox_best_effort(
     runtime: EntryProtectionLatchRuntime,
     *,

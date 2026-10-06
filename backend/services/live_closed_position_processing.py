@@ -26,6 +26,7 @@ class ClosedPositionProcessingRuntime:
     policy_suggester: Any
     build_trade_review_payload: Callable[..., dict[str, Any]]
     mark_recovery_closed: Callable[..., None]
+    release_pending_entry_protection: Callable[..., bool]
     entry_scores: MutableMapping[int, Any]
     entry_decisions: MutableMapping[int, Any]
     pending_open_attach_until: MutableMapping[int, Any]
@@ -247,4 +248,10 @@ def cleanup_closed_position(
     runtime.entry_scores.pop(pid, None)
     runtime.entry_decisions.pop(pid, None)
     runtime.pending_open_attach_until.pop(pid, None)
+    runtime.release_pending_entry_protection(
+        pid,
+        close_reason=close_reason,
+        close_ts=close_ts,
+        total_pnl=float(total_pnl),
+    )
     return projection_ready

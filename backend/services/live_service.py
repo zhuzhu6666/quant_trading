@@ -112,6 +112,7 @@ from backend.services.live_entry_protection import (
     EntryProtectionLatchRuntime,
     activate_entry_protection_pending_latch as _entry_protection_activate_latch,
     release_entry_protection_pending_latch as _entry_protection_release_latch,
+    release_entry_protection_pending_latch_after_broker_close as _entry_protection_release_after_close,
 )
 from backend.services.live_open_risk_context import (
     OpenLearningContextRuntime,
@@ -1372,6 +1373,22 @@ def _release_entry_protection_pending_latch(
         expected_stop_loss=expected_stop_loss,
         expected_take_profit=expected_take_profit,
         runtime=_entry_protection_latch_runtime(),
+    )
+
+
+def _release_entry_protection_pending_latch_after_broker_close(
+    position_id: int,
+    *,
+    close_reason: str,
+    close_ts: float,
+    total_pnl: float,
+) -> bool:
+    return _entry_protection_release_after_close(
+        position_id,
+        close_reason=close_reason,
+        close_ts=close_ts,
+        total_pnl=total_pnl,
+        release_latch_cause=release_no_new_risk_latch_cause,
     )
 
 
@@ -4775,6 +4792,7 @@ def _closed_position_processing_runtime() -> ClosedPositionProcessingRuntime:
         policy_suggester=_POLICY_SUGGESTER,
         build_trade_review_payload=_tick_build_trade_review_payload,
         mark_recovery_closed=live_close_settlement.mark_recovery_position_closed,
+        release_pending_entry_protection=_release_entry_protection_pending_latch_after_broker_close,
         entry_scores=_pos_entry_scores,
         entry_decisions=_pos_entry_decisions,
         pending_open_attach_until=_pending_open_attach_until,

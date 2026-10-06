@@ -2,6 +2,7 @@ from backend.services.live_entry_protection import (
     EntryProtectionLatchRuntime,
     activate_entry_protection_pending_latch,
     release_entry_protection_pending_latch,
+    release_entry_protection_pending_latch_after_broker_close,
 )
 
 
@@ -141,3 +142,40 @@ def test_release_failure_keeps_pending_attach_and_new_risk_blocked():
     assert state_updates[0]["entry_protection_pending"]["status"] == (
         "release_failed"
     )
+
+
+def test_broker_close_releases_the_pending_cause_for_that_position_only():
+    releases = []
+
+    released = release_entry_protection_pending_latch_after_broker_close(
+        295077652,
+        close_reason="broker_close",
+        close_ts=1_793.0,
+        total_pnl=-7.94,
+        release_latch_cause=lambda **kwargs: releases.append(kwargs),
+    )
+
+    assert released is True
+    assert len(releases) == 1
+    assert releases[0]["cause"] == "entry_protection_pending"
+    assert releases[0]["cause_id"] == "295077652"
+    assert releases[0]["reason"] == (
+        "position_closed_at_broker_no_residual_new_risk"
+    )
+    assert releases[0]["evidence"]["broker_position_absent"] is True
+    assert releases[0]["evidence"]["authoritative_close_deal"] is True
+
+
+def test_broker_close_release_never_fails_closed_position_attribution():
+    def unavailable(**_kwargs):
+        raise RuntimeError("latch ledger unavailable")
+
+    released = release_entry_protection_pending_latch_after_broker_close(
+        4242,
+        close_reason="broker_close",
+        close_ts=1_800.0,
+        total_pnl=1.0,
+        release_latch_cause=unavailable,
+    )
+
+    assert released is False
