@@ -106,7 +106,7 @@ def _duckdb_stats(path: Path) -> dict:
     errors = []
 
     try:
-        with duckdb_readonly_connection(path, snapshot_first=True) as con:
+        with duckdb_readonly_connection(path) as con:
             for t in con.execute("SHOW TABLES").fetchall():
                 tname = t[0]
                 try:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
 
 from backend.services import db_health_service as db_health
 
@@ -47,3 +48,26 @@ def test_db_health_delayed_start_is_interruptible_without_running_compute(monkey
     assert started["status"] == "started"
     assert stopped["status"] == "completed"
     assert called.is_set() is False
+
+
+def test_duckdb_stats_does_not_force_a_snapshot_copy(monkeypatch, tmp_path) -> None:
+    """The 55-second health refresh must not copy every DuckDB file to a temp dir.
+
+    ``duckdb_readonly_connection`` already falls back to a snapshot when a
+    real lock conflict appears, so forcing ``snapshot_first`` made each
+    refresh copy all bars/external/trades/events/archived files.
+    """
+
+    seen: dict = {}
+
+    @contextmanager
+    def fake_connection(path, **kwargs):
+        seen["path"] = path
+        seen["kwargs"] = kwargs
+        yield object()
+
+    monkeypatch.setattr(db_health, "duckdb_readonly_connection", fake_connection)
+    db_health._duckdb_stats(tmp_path / "bars.duckdb")
+
+    assert seen["path"].name == "bars.duckdb"
+    assert not seen["kwargs"].get("snapshot_first")
