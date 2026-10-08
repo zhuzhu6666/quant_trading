@@ -66,8 +66,8 @@ def _status_inc(bucket: dict[str, int], status: str) -> None:
 # calls them once per audited action (~58x/cycle) for the same data.  A short
 # TTL cache collapses those repeats; staleness is bounded at 60s, which is
 # fine for briefing/audit context (freshness lives in generated_at anyway).
-_SCORECARD_CACHE = TTLCache(maxsize=8, ttl_seconds=60.0)
-_ATTRIBUTIONS_CACHE = TTLCache(maxsize=16, ttl_seconds=60.0)
+_SCORECARD_CACHE = TTLCache(maxsize=8, ttl_seconds=60.0, copy_on_access=False)
+_ATTRIBUTIONS_CACHE = TTLCache(maxsize=16, ttl_seconds=60.0, copy_on_access=False)
 
 
 class AgentScorecardService:

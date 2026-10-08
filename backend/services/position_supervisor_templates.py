@@ -135,6 +135,8 @@ def build_legacy_position_supervisor_binding(
 
 def verify_position_supervisor_binding(
     binding: Mapping[str, Any] | None,
+    *,
+    _generated: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Verify a persisted binding without silently replacing it.
 
@@ -176,7 +178,7 @@ def verify_position_supervisor_binding(
             "reason": "binding_snapshot_missing",
             "binding": value,
         }
-    normalized = normalize_position_supervisor_template(dict(snapshot))
+    normalized = normalize_position_supervisor_template(dict(snapshot), _generated=_generated)
     expected_id = str(normalized.get("template_id") or "")
     expected_version = str(normalized.get("template_version") or "")
     if not expected_id or not expected_version:
@@ -258,7 +260,7 @@ def _binding_candidates(value: Any) -> list[dict[str, Any]]:
     return candidates
 
 
-def resolve_position_supervisor_binding_lineage(*sources: Any) -> dict[str, Any]:
+def resolve_position_supervisor_binding_lineage(*sources: Any, _generated: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Resolve one unambiguous binding from review/recovery/trace payloads.
 
     The helper deliberately does not manufacture a binding.  A compact trace
@@ -279,8 +281,10 @@ def resolve_position_supervisor_binding_lineage(*sources: Any) -> dict[str, Any]
 
     valid: list[dict[str, Any]] = []
     first_failure: dict[str, Any] | None = None
+    if _generated is None:
+        _generated = _generated_templates_from_state()
     for candidate in candidates:
-        checked = verify_position_supervisor_binding(candidate)
+        checked = verify_position_supervisor_binding(candidate, _generated=_generated)
         if checked.get("valid"):
             valid.append(dict(checked.get("binding") or candidate))
         elif first_failure is None:
@@ -649,11 +653,11 @@ def list_position_supervisor_templates(*, db_path: str | Path | None = None) -> 
     return list(items.values())
 
 
-def get_position_supervisor_template(template_id: str | None = None, *, db_path: str | Path | None = None) -> dict[str, Any]:
+def get_position_supervisor_template(template_id: str | None = None, *, db_path: str | Path | None = None, _generated: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     key = str(template_id or DEFAULT_TEMPLATE_ID)
     if key in _TEMPLATES:
         return deepcopy(_TEMPLATES[key])
-    generated = {str(item.get("template_id") or ""): item for item in _generated_templates_from_state(db_path)}
+    generated = {str(item.get("template_id") or ""): item for item in (_generated if _generated is not None else _generated_templates_from_state(db_path))}
     if key in generated:
         return deepcopy(generated[key])
     return deepcopy(_TEMPLATES[DEFAULT_TEMPLATE_ID])
@@ -792,12 +796,12 @@ def latest_applied_position_supervisor_template_id(
         conn.close()
 
 
-def normalize_position_supervisor_template(template: dict[str, Any] | str | None = None) -> dict[str, Any]:
+def normalize_position_supervisor_template(template: dict[str, Any] | str | None = None, *, _generated: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     if template is None or template == "":
-        return get_position_supervisor_template(DEFAULT_TEMPLATE_ID)
+        return get_position_supervisor_template(DEFAULT_TEMPLATE_ID, _generated=_generated)
     if isinstance(template, str):
-        return get_position_supervisor_template(template)
-    base = get_position_supervisor_template(str(template.get("template_id") or DEFAULT_TEMPLATE_ID))
+        return get_position_supervisor_template(template, _generated=_generated)
+    base = get_position_supervisor_template(str(template.get("template_id") or DEFAULT_TEMPLATE_ID), _generated=_generated)
     merged = _merge_template(base, template)
     merged["schema_version"] = str(merged.get("schema_version") or SCHEMA_VERSION)
     merged["template_id"] = str(merged.get("template_id") or DEFAULT_TEMPLATE_ID)

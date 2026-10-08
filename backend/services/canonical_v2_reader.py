@@ -1591,18 +1591,27 @@ def iter_decision_factor_values_by_factors(
                 if isinstance(event_row, Mapping)
                 else event_row[0]
             )
-            for snapshot in _parse_factor_snapshots(read_payload(conn, str(payload_hash))):
-                factor = str(snapshot.get("factor") or "")
-                if factor in result and (
-                    not limit or consumed[factor] < int(limit)
-                ):
-                    consumed[factor] += 1
-                    try:
-                        val = float(snapshot.get("normalized_value"))
-                    except Exception:
+            # Lean per-event extraction: avoid the 15-key snapshot dict
+            # materialization in `_parse_factor_snapshots`, the values stream
+            # only needs factor + normalized_value. Cap accounting still uses
+            # the raw per-factor row count, identical to the dict variant.
+            payload = read_payload(conn, str(payload_hash))
+            snapshots = payload.get("factor_snapshots") if isinstance(payload, Mapping) else None
+            if isinstance(snapshots, list):
+                for item in snapshots:
+                    if not isinstance(item, dict):
                         continue
-                    if math.isfinite(val):
-                        result[factor].append(val)
+                    factor = str(item.get("factor") or "")
+                    if factor in result and (
+                        not limit or consumed[factor] < int(limit)
+                    ):
+                        consumed[factor] += 1
+                        try:
+                            val = float(item.get("normalized_value"))
+                        except Exception:
+                            continue
+                        if math.isfinite(val):
+                            result[factor].append(val)
             if limit and int(limit) > 0:
                 filled = True
                 for factor in ids:

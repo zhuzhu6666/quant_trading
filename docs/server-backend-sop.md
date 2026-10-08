@@ -391,6 +391,25 @@ systemctl status quant-backend.service --no-pager
 - 可选收紧（当前不做，不阻塞）：把 register_shadow 的 hash 绑定改为提交时重绑或局部键校验，替代启动期全量比较；只有再次出现冻结回归时才评估。
 - 验证命令：`git log -1` 与 `systemctl show -p ActiveEnterTimestamp` 对比确认进程已加载新配置；journal 无活动 `governance_authority` cause 且 `system_health healthy` 才算闩清除。
 
+### 内存水位与 zram（2026-10-08 上线）
+
+物理内存 3.6Gi 偏小；learning worker / backend 的驻留+瞬态在治理窗口会触到 ~2.9GB，历史上触发过整机 OOM（10-08 17:13 journald `Under memory pressure`、PG SSL EOF、SSH banner 超时）。当前兜底是 zram，**不要再给进程加 `MemoryMax`**（项目要求全程在线不被杀）：
+
+- 现状：`zram.service`（开机自启）提供 zstd 2G swap，优先级 100；`/swap.img`（1.9G 文件 swap）降为 -2 兜底；`vm.swappiness=50`。
+- 只读检查：
+
+```bash
+zramctl                          # DATA(未压缩) vs COMPR，压缩比
+free -h; swapon --show
+ps -p <pid> -o rss,vsz; grep -E 'VmSwap|VmRSS' /proc/<pid>/status
+journalctl -u quant-learning-worker --grep "mem (after|before)" --since "1 hour ago" --no-pager
+```
+
+- worker `mem` 分段日志口径（`logs/debug.log`）：`[governance] mem after catalog/redundancy` 的 `rss=`/`hwm=` 是每轮证据；hwm 只增不减，**单看 hwm 不能判泄漏**，要同轮看 `rss=` 回落（正常治理窗口结束应回到 300~450MB）。
+- 危险信号：zram `DATA` 接近 2G 且压缩比明显劣化（<2x）、`available` <300Mi 持续、worker `rss` 在高位不回落——此时先排除新变更，再考虑升实例规格（**不要**先加进程级内存上限）。
+- 变更 zram：`sudo systemctl disable --now zram.service` 即回退；disksize/压缩算法在 unit 的 `ExecStart` 内调整后 `daemon-reload`。
+- 待收敛项：autonomous 轮驻留爆点（HWM 仍触 ~2.9GB）见 [legacy-debt-register.md](legacy-debt-register.md)「学习 worker 内存瞬时峰」条目，退出线未达前本条 SOP 保持有效。
+
 ## 9. 交易循环排查 SOP
 
 如果问题与交易循环有关，默认检查：

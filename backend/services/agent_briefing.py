@@ -19,7 +19,7 @@ from backend.services.v16_brain_snapshot import BrainMemoryService
 # counterfactuals) on every agent-context call; the governance cycle calls
 # agent_context once per audited action.  A short TTL cache dedupes those
 # identical reads within a cycle without changing freshness materially.
-_EXPERIENCE_CACHE = TTLCache(maxsize=32, ttl_seconds=60.0)
+_EXPERIENCE_CACHE = TTLCache(maxsize=32, ttl_seconds=60.0, copy_on_access=False)
 
 
 class AgentBriefingContextService:
