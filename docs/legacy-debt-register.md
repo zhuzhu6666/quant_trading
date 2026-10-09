@@ -6,6 +6,16 @@
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
 
+### 持仓监督模板早锁导致小赚大亏（2026-10-10 登记，代码已修、效果观察中）
+
+- 状态：`monitoring`（首轮修正已代码落地并受控重启加载：`reflex_policy` 成为可学习控制区段 + `_generated_reflex_min_mfe_template` 按 giveback severity 抬 `reflex_min_mfe`；effect 观察窗 24h→5 天。候选与切换需下一个 autonomous 周期产出并走完 V16/Coordinator/RiskPolicy，effect 窗 5 天后才有 verdict）
+- 事实（2026-10-10 03:36 现查，`canonical_v2.trade_review` 近 7 天 64 单、`counterfactual_review` 218 条、`supervisor_trace` 189 条只读）：31 胜/32 负，胜均 +4.41、负均 −4.86，盈亏比 0.91（中位 0.71）；赢单 MFE 平均 7.55 但实收中位只留 32%（MFE≥3 的 27 个赢单实收中位 32%、平均 52%）；`bad_loss 26`/`lucky_win 20`；亏损单 15/32 的 MAE≥6（保护只锁浮盈、不前置止损）。机制：`position_supervisor.py` 的 reflex 阶梯（`mfe>=reflex_min_mfe(3.0)` 且 giveback≥0.35 拖平 / ≥0.55 锁利 / ≥0.90 平仓）几乎命中每个有意义的赢单；收紧次数与 giveback 单调相关（0 次 32% → 1 次 52% → 2 次 84%）。系统自评一致：218 条 counterfactual 中 `protection_too_tight 116`（其中 governance_ready+fully_matured 73 条）。
+- 第二轮问题（修正空转）：近 14 天 autonomous_learning 切监督模板 7 次（`overprotection_relief` 与 `auto_tpsl` 两族），5 个有效果记录的应用**全部 `inconclusive`**——`evidence_quality` 显示 24h 窗（`max_observation_age_seconds=86400`）内 raw_post 0~3、`exact_regime` 分层后 4/5 baseline 与 2/3 post 被 `excluded_regime_mismatch` 剔除，`causal_status=observation_window_expired_inconclusive`、`bounded_attribution_allowed=False`，`position_supervisor_selection.v1` 长期 `candidate_count=0`。即切换每 1-2 天发生一次，观察窗永远攒不够样本，`in_flight` 门形同虚设。
+- canonical：候选生成唯一owner = `backend/services/position_supervisor_governance.py::build_position_supervisor_advisories`（单 control 契约）；模板执行唯一 owner = `backend/services/position_supervisor.py`；绑定/effect 唯一 owner = `PositionSupervisorGovernanceMutationService` + `research/learning/governor.RuleEvolutionGovernor`。本轮不新增任何第二 authority、表、线程或旋钮。
+- 剩余/待验：① 新 `auto_reflex_trigger` 候选需经 V16 bridge → Coordinator → RiskPolicy 落 production binding（`position_supervisor_selection.v1` 的 `default_binding.template_id` 应变更为新模板）；② 5 天窗关闭后必须拿到 `reinforced/ineffective/mixed` 的真实 verdict（不再 `inconclusive`）；③ 赢单实收/MFE 中位从 32% 回升（观察目标 ≥50%）、`protection_too_tight` 占比从 53% 降到 <25%；④ 亏损侧 MAE≥6 比例（当前 15/32）本轮未动，属下一刀（前置止损/ tightness 侧）。
+- 退出：连续两个 5 天 effect 窗给出非 inconclusive verdict，且 KPI（赢单 MFE 捕获中位、protection_too_tight 占比）朝目标方向连续两周；任意时候 KPI 恶化立即回滚模板（rollback 计划已由 application ledger 承载）。
+- 验证命令：`.venv/bin/python scripts/state_query.py` 查 `runtime.learning_application_log` 的 `details_json`（`effect.causal_status`、`evidence_quality.bounded_attribution_allowed`）；`canonical_v2.event` 的 `counterfactual_review` 标签分布；`runtime_kv` 的 `position_supervisor_selection.v1`；针对性测试 `tests/test_position_supervisor_governance.py`、`tests/test_learning_effect_quality.py`、`tests/test_factor_governance_effect_tracker.py`。
+
 ## 1. 全局收敛
 
 ### supervisor 经验已进入记忆索引，但自动模板准入仍未达标

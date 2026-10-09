@@ -108,6 +108,7 @@ P2 complete 不授权清锁或切换静态 flag。
 - partial/missing/contaminated evidence 治理权重为零；
 - terminal、bounded、可比较 effect 才能形成 prior；同一 scope 同时最多一个 active effect；
 - 新 canonical 入口同批删除平行 writer/reader，不新增 ExperienceMemoryService、第二 evidence store、pgvector 或 shadow writer。
+- **持仓监督早锁批（2026-10-10）可重复验收**：`build_position_supervisor_advisories(day=…)` 在 `capture_failure` 证据成立时同时产出 tpsl 与 `auto_reflex_trigger` 两个单控候选（后者 `candidate_patch.path=reflex_policy.reflex_min_mfe`、值 = base+3.0×giveback severity 且落在 `min/max_reflex_min_mfe` 内），surface 处于 `observing/mixed` 时两个候选都以 `observation_window_in_flight` 记入 `skipped`；demo autonomy 传 `max_observation_age_seconds=DEMO_EFFECT_OBSERVATION_WINDOW_SECONDS`（5 天）给 `reconcile_application_effects`，24h 常数在 `autonomous_learning.py`/`evolution_orchestrator.py` 已无残留。针对性测试：`tests/test_position_supervisor_governance.py`、`tests/test_learning_effect_quality.py`、`tests/test_factor_governance_effect_tracker.py`。
 
 ## 6. P4 V16 与因果治理
 

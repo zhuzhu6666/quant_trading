@@ -1030,6 +1030,7 @@ _SUPERVISOR_TEMPLATE_CONTROL_SECTIONS = (
     "sl_policy",
     "tp_policy",
     "capture_policy",
+    "reflex_policy",
     "learning_bounds",
 )
 
@@ -2285,6 +2286,52 @@ def build_position_supervisor_advisories(
             },
         }
 
+    def _generated_reflex_min_mfe_template(
+        *,
+        day: str,
+        capture_failure_summary: dict[str, Any],
+        capture_failed_count: int,
+    ) -> dict[str, Any] | None:
+        """Lift the reflex trigger above the MFE range that produced capped wins.
+
+        One control, one candidate: ``reflex_policy.reflex_min_mfe`` is raised
+        by a severity-scaled step (max +3.0 at full giveback severity) and
+        clamped to the base template's learning bounds.  The reflex ladder,
+        base lock level and every other control stay untouched, so the
+        candidate remains a single-control patch the governor can replay.
+        """
+
+        if int(capture_failed_count) <= 0:
+            return None
+        base = get_position_supervisor_template(PROFIT_PROTECTION_TEMPLATE_ID)
+        reflex_policy = dict(base.get("reflex_policy") or {})
+        learning_bounds = dict(base.get("learning_bounds") or {})
+        base_min_mfe = _safe_float(reflex_policy.get("reflex_min_mfe"), 3.0)
+        min_bound = _safe_float(learning_bounds.get("min_reflex_min_mfe"), base_min_mfe)
+        max_bound = _safe_float(learning_bounds.get("max_reflex_min_mfe"), base_min_mfe + 3.0)
+        severity = min(
+            1.0,
+            max(
+                0.0,
+                _safe_float(capture_failure_summary.get("avg_failed_giveback_ratio")),
+            ),
+        )
+        candidate_min_mfe = max(
+            min_bound,
+            min(max_bound, round(base_min_mfe + 3.0 * severity, 2)),
+        )
+        if abs(candidate_min_mfe - base_min_mfe) < 1e-9:
+            return None
+        return _build_single_control_candidate_template(
+            day=day,
+            action="reflex_trigger",
+            base_template_id=PROFIT_PROTECTION_TEMPLATE_ID,
+            control_path="reflex_policy.reflex_min_mfe",
+            candidate_value=candidate_min_mfe,
+            regime_stratum="range_capture",
+            generation_reason="reflex_trigger_too_low",
+        )
+
     def _add(
         action: str,
         confidence: float,
@@ -2424,6 +2471,32 @@ def build_position_supervisor_advisories(
                         "capture_failure_examples": capture_failure_summary.get("examples") or [],
                     },
                     target_template_id=generated_template["template_id"],
+                )
+            reflex_candidate = _generated_reflex_min_mfe_template(
+                day=day,
+                capture_failure_summary=capture_failure_summary,
+                capture_failed_count=capture_failed_count,
+            )
+            if reflex_candidate:
+                # The reflex ladder (breakeven 0.35 / lock 0.55 / close 0.90)
+                # fires on every winner that reaches ``reflex_min_mfe``, so a
+                # low trigger mechanically caps winners at a third of their
+                # MFE (measured: median capture 32% on MFE>=3 winners).  Lifting
+                # the trigger keeps the same ladder for genuinely large runs
+                # and leaves medium winners to their TP/SL.
+                _add(
+                    "switch_position_supervisor_template",
+                    min(0.90, 0.76 + 0.03 * capture_failed_count),
+                    "generated reflex-trigger template: lift reflex_min_mfe so early winners are not capped",
+                    {
+                        "day": day,
+                        "candidate_template_id": reflex_candidate["template_id"],
+                        "candidate_template": reflex_candidate,
+                        "base_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
+                        "generation_reason": "reflex_trigger_too_low",
+                        "capture_failure_examples": capture_failure_summary.get("examples") or [],
+                    },
+                    target_template_id=reflex_candidate["template_id"],
                 )
             capture_candidate = _build_single_control_candidate_template(
                 day=day,

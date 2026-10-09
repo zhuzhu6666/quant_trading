@@ -32,6 +32,7 @@ from backend.core.db import get_state_pg_conn
 from backend.core.state_store import RuntimeStateSchemaError, validate_runtime_state_schema
 
 from backend.services.autonomous_learning import autonomy_mode
+from research.learning.application_effects import DEMO_EFFECT_OBSERVATION_WINDOW_SECONDS
 from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
 
 
@@ -1915,7 +1916,7 @@ def update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> boo
             governance_result["reconcile_active"] = _gov.reconcile_active()
             _effect_reconcile_kwargs = (
                 {
-                    "max_observation_age_seconds": 86400.0,
+                    "max_observation_age_seconds": DEMO_EFFECT_OBSERVATION_WINDOW_SECONDS,
                 }
                 if autonomy_mode() in {"demo_autonomous", "demo_nursery"}
                 else {}

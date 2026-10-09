@@ -62,6 +62,7 @@ from backend.services.position_supervisor_templates import (
 )
 from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
 from research.features.evidence_contract import build_evidence_contract
+from research.learning.application_effects import DEMO_EFFECT_OBSERVATION_WINDOW_SECONDS
 from backend.services.supervisor_payload_contract import (
     compact_supervisor_mapping as compact_supervisor_mapping,
 )
@@ -6201,12 +6202,15 @@ def apply_demo_autonomy(
         from research.learning.governor import RuleEvolutionGovernor
 
         # Demo nursery must not let an old observation-only window occupy a
-        # scope indefinitely.  One day is long enough to collect a live demo
-        # observation, while an absent/insufficient baseline is explicitly
-        # closed as inconclusive and retried through a new governed application.
+        # scope indefinitely.  Five days is long enough for the live demo's
+        # ~9 reviewed trades/day to clear the bounded comparison, while an
+        # absent/insufficient baseline is still closed as inconclusive and
+        # retried through a new governed application.  The historical 24h
+        # override terminalized every supervisor window with 0 usable post
+        # samples (see DEMO_EFFECT_OBSERVATION_WINDOW_SECONDS).
         demo_effect_reconcile = RuleEvolutionGovernor(str(db_path)).reconcile_application_effects(
             application_limit=2000,
-            max_observation_age_seconds=86400.0,
+            max_observation_age_seconds=DEMO_EFFECT_OBSERVATION_WINDOW_SECONDS,
         )
     factor_pruning_governance = _run_demo_nursery_factor_pruning_governance(db_path=db_path, bridge_limit=5)
     conn = _connect(db_path)
@@ -6628,14 +6632,14 @@ def run_autonomous_learning_cycle(
         )
 
     gov = RuleEvolutionGovernor(str(db_path))
-    # Demo autonomy closes an observation window on its own clock: one day is
-    # long enough to collect a live demo observation, and an absent/insufficient
-    # baseline is then recorded as inconclusive with retry_via_new_application.
-    # Terminalizing a mixed window on the very next cycle instead would leave
-    # the governed selection bar (matured comparable trades) unreachable.
+    # Demo autonomy closes an observation window on its own clock: five days
+    # is long enough for the live demo's ~9 reviewed trades/day to reach the
+    # bounded comparison, and an absent/insufficient baseline is then recorded
+    # as inconclusive with retry_via_new_application.  The historical 24h
+    # override terminalized every window with zero usable post samples.
     _effect_reconcile_kwargs = (
         {
-            "max_observation_age_seconds": 86400.0,
+            "max_observation_age_seconds": DEMO_EFFECT_OBSERVATION_WINDOW_SECONDS,
         }
         if autonomy_mode() in {"demo_autonomous", "demo_nursery"}
         else {}

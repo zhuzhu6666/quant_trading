@@ -384,6 +384,8 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "max_tp_extension_factor": 0.50,
             "min_profit_lock_multiplier": 0.35,
             "max_profit_lock_multiplier": 0.85,
+            "min_reflex_min_mfe": 3.0,
+            "max_reflex_min_mfe": 12.0,
             "regime_evidence_min_confidence": REGIME_EVIDENCE_MIN_CONFIDENCE_FALLBACK,
             "regime_evidence_min_observations": REGIME_EVIDENCE_MIN_OBSERVATIONS_FALLBACK,
         },

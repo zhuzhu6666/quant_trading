@@ -469,11 +469,19 @@ def test_position_supervisor_advisories_materialize_mfe_capture_failure_template
     assert capture_evidence["base_template"]["template_id"] == DEFAULT_TEMPLATE_ID
     assert capture_evidence["candidate_patch"]["path"] == "thresholds.giveback_reduce_threshold"
     assert capture_evidence["generation_context"]["regime_stratum"] == "range_capture"
-    generated = items["switch_position_supervisor_template"]
-    assert generated["scope_key"].startswith("position_supervisor:auto_tpsl.")
-    assert generated["evidence"]["candidate_template"]["tp_policy"]["extension_enabled"] is True
-    assert generated["evidence"]["candidate_patch"]["path"] == "sl_policy.profit_lock_multiplier"
-    assert generated["evidence"]["generation_context"]["regime_stratum"] == "range_capture"
+    switches = [
+        item for item in result["items"] if item["action"] == "switch_position_supervisor_template"
+    ]
+    tpsl = next(i for i in switches if i["scope_key"].startswith("position_supervisor:auto_tpsl."))
+    assert tpsl["evidence"]["candidate_template"]["tp_policy"]["extension_enabled"] is True
+    assert tpsl["evidence"]["candidate_patch"]["path"] == "sl_policy.profit_lock_multiplier"
+    assert tpsl["evidence"]["generation_context"]["regime_stratum"] == "range_capture"
+    reflex = next(
+        i for i in switches if i["scope_key"].startswith("position_supervisor:auto_reflex_trigger.")
+    )
+    assert reflex["evidence"]["candidate_patch"]["path"] == "reflex_policy.reflex_min_mfe"
+    assert reflex["confidence"] >= tpsl["confidence"]
+    generated = reflex
 
     conn = sqlite3.connect(str(db_path))
     try:
@@ -489,7 +497,9 @@ def test_position_supervisor_advisories_materialize_mfe_capture_failure_template
             SELECT scope_key, action, status, evidence_json
             FROM policy_suggestion
             WHERE action='switch_position_supervisor_template'
-            """
+              AND scope_key=?
+            """,
+            (generated["scope_key"],),
         ).fetchone()
         eligible_row = conn.execute(
             """

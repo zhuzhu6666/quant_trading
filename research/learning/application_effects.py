@@ -5,6 +5,15 @@ from dataclasses import dataclass
 
 IN_FLIGHT_EFFECT_STATUSES = frozenset({"observing", "mixed"})
 
+# Demo autonomy closes an observation window on its own clock.  The historical
+# 24h override was tuned for a sample stream the surface never produced: the
+# live demo closes ~9 reviewed trades/day, of which the exact-regime stratum
+# keeps 0-1, so every 24h window terminalized "inconclusive" with zero usable
+# post samples and the supervisor surface re-switched every 1-2 days without a
+# verdict.  Five days collects enough clean trades for the bounded
+# (unstratified) comparison while still bounding a bad switch's exposure.
+DEMO_EFFECT_OBSERVATION_WINDOW_SECONDS = 5.0 * 86400.0
+
 
 @dataclass(frozen=True)
 class EffectClassification:
