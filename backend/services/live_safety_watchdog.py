@@ -506,10 +506,12 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
     supervisor_record = active_causes.get(supervisor_cause) or {}
     supervisor_metadata = dict(supervisor_record.get("metadata") or {})
     supervisor_error = str(supervisor_metadata.get("error") or "")
-    if (
-        supervisor_record
-        and supervisor_error
-        == "amend_projection_unverified:position_missing_after_amend"
+    # A broker-accepted amend whose protection was never verified (stale
+    # reconcile, mismatch, or position already gone) releases only on the
+    # same evidence: a fresh broker open-position set confirming the target
+    # no longer exists. A still-open target keeps the latch for any reason.
+    if supervisor_record and supervisor_error.startswith(
+        "amend_projection_unverified:"
     ):
         open_position_ids = live_close_settlement.fresh_cached_broker_open_position_ids()
         try:

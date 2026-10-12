@@ -524,6 +524,46 @@ def test_watchdog_releases_missing_supervisor_position_after_fresh_reconcile():
     assert live_service.live_state_get("safety_failure", clone=True) == {}
 
 
+def test_watchdog_releases_stale_reconcile_supervisor_cause_once_position_closed():
+    now = time.time()
+    activate_no_new_risk_latch(
+        reason="safety freshness failed",
+        actor="system:supervisor_tighten",
+        metadata={
+            "error": "amend_projection_unverified:position_reconcile_stale",
+            "position_id": 296307655,
+        },
+        cause="safety_freshness",
+        cause_id="supervisor_tighten",
+    )
+    live_service.live_state_update(
+        positions_reconciled=[],
+        positions_updated_at=now,
+        positions_reconcile_id="reconcile-empty",
+        safety_failure={"source": "supervisor_tighten"},
+    )
+    result = evaluate_safety_freshness(
+        {
+            "enabled": True,
+            "running": True,
+            "started_at": now - 60.0,
+            "safety_heartbeat_at": now,
+            "account_updated_at": now,
+            "positions_updated_at": now,
+            "unknown_execution_count": 0,
+        },
+        now=now,
+    )
+
+    live_service.live_safety_watchdog._on_live_safety_watchdog_recovery(result)
+
+    assert {
+        (item["cause"], item["cause_id"])
+        for item in no_new_risk_latch_status()["causes"]
+    } == set()
+    assert live_service.live_state_get("safety_failure", clone=True) == {}
+
+
 def test_watchdog_keeps_supervisor_cause_while_target_position_is_open():
     now = time.time()
     activate_no_new_risk_latch(
