@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Last verified: 2026-09-27 00:25 CST（**参数模板自锁修复已加载并双向验证**：23:47:41 backend / 23:48:18 learning worker（用户授权），`release_identity.head=e72584d2`、`clean=true`、两端 `overlay hash=4af21662…` 一致、`recovery bootstrap attached 1 live positions after restart`；治理侧 23:53 轮 `evolution_hourly` **114.9s** 且 `handoff_parameter_template_*` 计数冻结在 4,024 / 7,076 ⇒ 不再写交接单；学习侧 00:12 轮 `parameter_template_auto_materialize` **`skipped_existing` 20 → 0、`suggested` 0 → 6** ⇒ 物化腿跑通。同时暴露下游两道闸（`job_enqueue_did_not_return_row` ×13 与 governor 判切换建议 `eligibility_contract_invalid` ×6），待下一批修；`observation_window_in_flight` 首次产线命中已取得。**2026-09-27 续：第一道闸（eligibility 契约）已修在代码侧（未加载，待受控重启），见 §2 本批**。逐项证据与展开见 §2）
+> Last verified: 2026-10-14 20:30 CST（**日内会话结算断点 + 归因读侧取旧，两处修复随 19:38:36 CST 受控重启加载**：归因事实 19:46:01 起恢复真值（`window trades=24 primary=execution pnl=$-18.06`），会话统计由启动重建回 14 笔 / −14.45（此前 5.5 天恒 0.00）；退役路径的日内重建待首笔真实平仓现查；展开见 §2 本批。此前 2026-09-27 00:25 CST（**参数模板自锁修复已加载并双向验证**：23:47:41 backend / 23:48:18 learning worker（用户授权），`release_identity.head=e72584d2`、`clean=true`、两端 `overlay hash=4af21662…` 一致、`recovery bootstrap attached 1 live positions after restart`；治理侧 23:53 轮 `evolution_hourly` **114.9s** 且 `handoff_parameter_template_*` 计数冻结在 4,024 / 7,076 ⇒ 不再写交接单；学习侧 00:12 轮 `parameter_template_auto_materialize` **`skipped_existing` 20 → 0、`suggested` 0 → 6** ⇒ 物化腿跑通。同时暴露下游两道闸（`job_enqueue_did_not_return_row` ×13 与 governor 判切换建议 `eligibility_contract_invalid` ×6），待下一批修；`observation_window_in_flight` 首次产线命中已取得。**2026-09-27 续：第一道闸（eligibility 契约）已修在代码侧（未加载，待受控重启），见 §2 本批**。逐项证据与展开见 §2）
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -306,6 +306,22 @@ Remaining compatibility: 6 条被拒历史行保留（`governance_eligible=0` �
 Runtime verification: **未加载**——需用户授权的受控重启（learning worker；backend 无本批代码路径可不动，但如需 release_identity 一致可同批）。加载后现查口径：新一轮 `parameter_template_auto_materialize` 的 `suggested` 不再被 governor 判 `eligibility_contract_invalid`、`policy_suggestion` 出现 `governance_eligible=1` 的 `switch_parameter_template` 行、进而首个真实切换落账判据（`parameter_template_switch_log` 非空）
 Unresolved live evidence: 首个真实 `switch_parameter_template` 落账仍待验（未加载）；`offline_jobs` 入队键缺陷（`job_enqueue_did_not_return_row`）按裁定单列一批
 Next batch: 受控重启加载本批 + 现查 6 条建议能否进 approved/claim；随后修入队键（第二道闸）与 B 批收尾（平行 authority 清单见登记册）、C 批组件状态三读者收口
+```
+
+**本批（2026-10-14 晚间：归因读侧取旧 + 日内会话结算断点，提交 `f3a49c8` / `abdb786`，用户授权受控重启）**：
+
+```text
+Batch: 两个独立缺陷同批修：① 归因事实（`session.drawdown_attribution.v1`）的有界复盘读取取到最旧 200 条；② 券商缺失持仓的退役路径消费平仓后不再触发会话重建，日内会话统计自 10-09 08:00 CST（UTC 日切）起冻结在零值
+Canonical authority: ① 复盘流唯一读路径 = `backend.services.canonical_v2_reader._review_event_rows`（只改有界读取的截断方向，输出顺序与 `limit=0` 全量语义不变），`drawdown_attribution` 仍只消费；② 日内会话统计唯一 writer = `backend.services.live_close_settlement.restore_session_state_for_day` 不变，本批只补触发点：`live_recovery_close.retire_broker_missing_position` 在 `remove_live_position_state` 之后以本次新鲜券商持仓快照 + 本笔 position_id 作 confirmed close 重建
+Deleted paths: `_review_event_rows` 的旧语义 "正 `limit` 时 `ORDER BY observed_at ASC … LIMIT`（取最旧 N）"删除，替换为取最新 N；其余无删除
+Not added: 无新表 / 新列 / 新迁移 / 新开关 / 第二套判据 / 新抽象；`MissingPositionRetirementRuntime` 新增两个**必需**字段（`restore_session_state`、`trade_date`），两个构造点（生产 wrapper + 测试夹具）同步提供，缺省构造会直接失败
+Root cause: ① 复盘总数 715 > 上限 200，ASC+LIMIT 取到的最旧 200 条止于 09-12 12:43，被 24h 窗口全部滤掉 ⇒ 事实恒 "no_reviews_in_window"（24h 内实际有 22 条复盘）。② 一笔持仓被券商平掉后由退役路径收尾（写复盘/ledger/放锁），同时 `_prev_position_ids.discard(pid)` + 恢复行置 closed ⇒ tick 平仓检测的两个输入（`previous_position_ids ∪ tracked_position_ids`）都不再含它 ⇒ 关闭周期（会话重建唯一挂载点）永不见这笔平仓；退役路径自身不结算 ⇒ 内存会话投影停在日切零值，tick 日志 `pnl_session=0.00` 恒定（10-09 07:55 最后一次非零 −28.12）
+Targeted verification: ① `tests/test_canonical_v2.py::test_reader_review_read_limit_keeps_newest_reviews`（5 条复盘、`limit=2` 必须返回最新两条；旧语义下取最旧两条即红）；② `tests/test_live_recovery_close.py::test_retirement_rebuilds_session_risk_after_missing_close`（退役成功后必须调用会话重建，参数 = 新鲜券商持仓集 `{99}` + `confirmed_closed_position_ids={16}`）；退役族 46 + 关闭周期/会话族 38 + 服务生命周期/门面族 101 + 归因/读取族 33 passed
+Migration/OpenAPI/build: 无 schema 变更（migration ledger 37/37 由重启预检确认）；无端点签名变更；无前端 decoder 变更（`live.session_state` 与归因事实的字段形状未动）
+Runtime verification: 2026-10-14 19:38:36 CST 受控重启（用户授权；预检：空仓、`py_compile` 通过、五文件改动、无未收口 execution intent）：关机 `graceful/ownership_released/recovery_required=false`、启动即 `overlay restored hash=755abea8…`（无治理闩）、`release_identity.worktree_fingerprint 688321f4… → e4f2719b…`（运行进程加载含修复工作区；`head=294e157`、`clean=false` 因代码未提交）、`/api/health` ok/db/ctrader connected、0 ERROR、readiness `ok=true/blockers=[]`。① **归因修复已生产验收**：加载后首个定时任务（19:46:01）`[drawdown_attribution] window trades=24 primary=execution pnl=$-18.06`，KV 同步 24 笔 / −18.06 / narrative 完整（重启前恒 `trades=0/no_reviews_in_window`）。② **启动重建已生产验收**：19:39:42 `recovery bootstrap confirmed broker has no open positions` → 19:39:44 tick 日志 `pnl_session=-14.45`、KV `available/14 笔/−14.45/start 430.15`（与加载前只读决策模拟逐字段一致）。只读决策模拟（`resolve_session_restore`，不写库）先行验证：`restored=True/authoritative=True`、连亏 1、日回撤 3.36%
+Remaining compatibility: 两个触发点（关闭周期尾段 + 退役路径）共存于同一 writer；成交明细延迟的平仓仍走"退役先 defers（`broker_position_missing_close_deal_unavailable`）→ 关闭周期拾取并结算"的原路径，不双写、无旧路径残留
+Unresolved live evidence: ① **退役路径的日内重建尚未在真实平仓上现查**（重启后循环空仓、无新成交）——判据：日志出现 `broker missing position retired pos=…` 后，同一笔平仓在同一 tick 内使 `live.session_state.<UTC 日>` 的 legs/pnl/`session_observed_at` 前进（修复前会冻结）；失败即按 `regressed` 重新登记。② 就绪投影的 `account_reconcile_stale`/`positions_reconcile_stale` 抖动（`LIVE_SAFETY_FRESHNESS_SEC=20s` vs 20s+ tick 间隔；20:02 true / 20:04 false / 20:06 true）属既有间歇自解现象（口径见 §2 2026-09-23 批），本批未动
+Next batch: 盯 ① 的首笔平仓现查；`ready_for_live_execution` 抖动若不再间歇自解，按既有"慢 tick"出口线评估是否需 `regressed` 登记
 ```
 
 ## 3. 未完成 / 待复核证据

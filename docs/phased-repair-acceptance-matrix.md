@@ -1,7 +1,7 @@
 # 分期修复故障与验收矩阵
 
 > Status: active acceptance index
-> Snapshot: 2026-09-23 (新增 §13 候选评审冲突集的 completed-chain 让面；§2-§12 仍引用各自批次的验收证据，最新运行计数以 phased-repair-rollout-status.md 为准)
+> Snapshot: 2026-10-14 (新增 §16 归因读侧取旧与日内会话结算断点；§2-§15 仍引用各自批次的验收证据，最新运行计数以 phased-repair-rollout-status.md 为准)
 > Scope: reproducible acceptance evidence and unresolved live evidence
 
 本文只记录“如何证明”和当前未满足的运行证据。架构事实见 `system-source-of-truth.md`，实施阶段见 `planning/production-autonomy-repair-optimization-plan.md`，当前状态见 `phased-repair-rollout-status.md`。已完成批次的详细流水通过 Git 历史追溯，不在本矩阵重复保存。
@@ -297,3 +297,21 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 已加载运行证据：① 第二刀（12:43:44 backend / 13:02:26 learning worker / 12:44 job worker）：预检 migration 37/37、readiness `ok=true/ready_for_live_execution=true`、broker 无持仓、job worker 空闲；两服务 `overlay restored hash=d86bcd07…` 一致、投影 100/100/0、0 ERROR；加载前同口径基线（旧码）12:42 轮 1212.2s、`list_recommendations` 阶段 ≈1181s；加载后 13:12 轮 `list_recommendations` 阶段 **249s**、`finished autonomous_learning in **294.9s**`（-76%），13:17:00 `autonomous_evolution_nursery` 即刻取锁并 157.3s 完成（`run_bar_replay_evidence` ok，自 09-22 18:25 停摆后首次整轮）；13:39 supervisor_learning 33.6s。② 被本刀解锁的 P0/P1 复现（13:23 / 13:53 两轮）：posture 回到 `full` 后治理块 **39s / 30.1s**、块内 RSS **+325MB / +308MB**（对照修复前 265~416s / +1344~+1490MB），`evolution_hourly` **154.9s / 146.6s**（09-14 基线带 129.4~180.6s 内），残留 30s 取样无单一热点（JSON 30% / 短命连接 26% / payload 解码 20%）。
 
 未完成运行证据：连续 24h 无单轮 >900s 的棘轮观察；floor 之上 ~1.7GB 残留峰归因（只许只读观测）。
+
+## 16. 归因读侧取旧与日内会话结算断点（2026-10-14，提交 f3a49c8 / abdb786）
+
+| 合同 | 权威 / 针对性证据 |
+|---|---|
+| 复盘有界读取取最新 N | `canonical_v2_reader._review_event_rows`：正 `limit` 时 `ORDER BY observed_at DESC, event_id DESC LIMIT ?`，输出仍观测升序（`iter_reviews` 自身排序）；`limit=0` 全量语义不变；`latest_only=False` 与按 review_id 的读取路径不受影响 |
+| 归因窗口不再结构性为空 | `drawdown_attribution.load_recent_reviews` 仍消费该读路径（limit=200）；生产只读复算：最新 200 条跨 09-30~10-14、24h 窗 23 笔 / −13.17 / primary=execution（修复前恒 0 笔、`no_reviews_in_window`） |
+| 会话重建在退役路径上有唯一触发 | `live_recovery_close.retire_broker_missing_position` 在 `remove_live_position_state` 后调用 `restore_session_state_for_day(today, broker_open_position_ids=<本次新鲜券商快照>, confirmed_closed_position_ids={pid})`；`MissingPositionRetirementRuntime.restore_session_state` / `trade_date` 为必需字段，缺省构造直接失败 |
+| 单 writer / 单计算者未变 | 会话统计唯一 writer 仍是 `restore_session_state_for_day`（`resolve_session_restore` 纯决策）；退役路径与关闭周期尾段只是两个触发点，无第二套判据 |
+| unknown/stale 语义未变 | 重建失败沿既有 `degraded_cache` / `unavailable` 分支（`accepting_new_risk=false`）；本批未把任何 unknown 转默认值 |
+
+定向验证：`test_reader_review_read_limit_keeps_newest_reviews`（5 条复盘、`limit=2` 必须最新两条；旧语义取最旧两条即红）；`test_retirement_rebuilds_session_risk_after_missing_close`（参数 = 新鲜持仓集 `{99}` + `{16}`）；退役族 46 + 关闭周期/会话族 38 + 服务生命周期/门面族 101 + 归因/读取族 33 passed。
+
+生产数据只读决策模拟（`resolve_session_restore`，不写库）：新鲜持仓集 + 当日成交 → `restored=True/authoritative=True`、`session_pnl=-14.45`、14 笔、连亏 1、日回撤 3.36%、`available`。
+
+已加载运行证据：2026-10-14 19:38:36 CST 受控重启（graceful、`overlay restored`、worktree 指纹 `688321f4… → e4f2719b…`）；① 19:46:01 归因任务 `trades=24 / −18.06 / primary=execution`（重启前恒 0）；② 19:39:44 tick 日志 `pnl_session=-14.45`、KV `available/14 笔/−14.45`（此前 5.5 天恒 0.00）。
+
+未完成运行证据：退役路径的日内重建需一笔真实平仓现查——`broker missing position retired pos=…` 出现后同一 tick 内 `live.session_state.<UTC 日>` 的 legs/pnl/`session_observed_at` 前进；失败按 `regressed` 登记。
