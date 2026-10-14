@@ -13,7 +13,9 @@ from backend.services.canonical_v2_reader import (
 )
 from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.position_supervisor_governance import (
+    _build_single_control_candidate_template,
     _counterfactual_summary,
+    _single_control_candidate_contract,
     build_position_supervisor_advisories,
     replay_position_supervisor_templates,
 )
@@ -22,6 +24,7 @@ from backend.services.position_supervisor_templates import (
     CONSERVATIVE_TEMPLATE_ID,
     DEFAULT_TEMPLATE_ID,
     PROFIT_PROTECTION_TEMPLATE_ID,
+    get_position_supervisor_template,
     list_position_supervisor_templates,
 )
 
@@ -479,8 +482,16 @@ def test_position_supervisor_advisories_materialize_mfe_capture_failure_template
     reflex = next(
         i for i in switches if i["scope_key"].startswith("position_supervisor:auto_reflex_trigger.")
     )
-    assert reflex["evidence"]["candidate_patch"]["path"] == "reflex_policy.reflex_min_mfe"
+    reflex_patch = reflex["evidence"]["candidate_patch"]
+    assert reflex_patch["path"] == "reflex_policy.reflex_min_mfe"
+    assert reflex_patch["intent_direction"] == "raise"
+    # The reflex trigger must be lifted above the base, never lowered: a
+    # candidate that lowers it would clip every winner even earlier.
+    assert float(reflex_patch["candidate_value"]) > float(reflex_patch["base_value"])
     assert reflex["confidence"] >= tpsl["confidence"]
+    assert _single_control_candidate_contract(
+        reflex["evidence"]["candidate_template"]
+    )["ok"] is True
     generated = reflex
 
     conn = sqlite3.connect(str(db_path))
@@ -910,6 +921,112 @@ def test_supervisor_switch_waits_for_the_open_observation_window(tmp_path):
     )
 
 
+def test_supervisor_switch_does_not_repeat_an_unjudged_change(tmp_path):
+    """A window closed without mature samples must not restart the same change."""
+
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+    _seed_overprotection_reviews(db_path)
+
+    LearningApplicationStore(db_path).prepare_application(
+        scope_type="position_supervisor_template",
+        scope_key="position_supervisor:auto_overprotection_relief.unjudged.v1",
+        action="switch_position_supervisor_template",
+        status="inconclusive",
+        details={
+            "canary_evidence": {
+                "mature_trade_count": 0,
+                "required_trade_count": 20,
+            },
+            "evidence": {
+                "candidate_template": {
+                    "candidate_patch": {
+                        "path": "thresholds.min_thesis_break_seconds",
+                        "base_value": 900.0,
+                        "candidate_value": 300.0,
+                    }
+                }
+            },
+        },
+    )
+
+    result = build_position_supervisor_advisories(day="2026-06-26", db_path=db_path)
+
+    assert result["observation_window"]["state"] == "evidence_insufficient"
+    assert all(
+        item["action"] != "switch_position_supervisor_template"
+        for item in result["items"]
+    )
+    assert any(
+        item["reason"] == "repeat_switch_without_evidence"
+        for item in result["skipped"]
+    )
+
+
+def test_closed_window_evidence_state_blocks_only_the_unjudged_control():
+    from backend.services.position_supervisor_governance import (
+        _closed_window_evidence_state,
+        _patch_repeats_observation_anchor,
+    )
+
+    window = _closed_window_evidence_state(
+        {
+            "application_id": "psv_apply_unjudged",
+            "status": "inconclusive",
+            "canary_evidence": {
+                "mature_trade_count": 1,
+                "required_trade_count": 20,
+            },
+            "evidence": {
+                "candidate_template": {
+                    "candidate_patch": {
+                        "path": "reflex_policy.reflex_min_mfe",
+                        "base_value": 3.0,
+                        "candidate_value": 6.0,
+                    }
+                }
+            },
+        }
+    )
+    assert window["state"] == "evidence_insufficient"
+    assert window["anchor_patch"]["direction"] == "raise"
+
+    same_control = {
+        "candidate_patch": {
+            "path": "reflex_policy.reflex_min_mfe",
+            "intent_direction": "raise",
+        }
+    }
+    assert _patch_repeats_observation_anchor(same_control, window) is True
+
+    other_direction = {
+        "candidate_patch": {
+            "path": "reflex_policy.reflex_min_mfe",
+            "intent_direction": "lower",
+        }
+    }
+    assert _patch_repeats_observation_anchor(other_direction, window) is False
+
+    other_control = {
+        "candidate_patch": {
+            "path": "sl_policy.profit_lock_multiplier",
+            "intent_direction": "lower",
+        }
+    }
+    assert _patch_repeats_observation_anchor(other_control, window) is False
+
+    judged = _closed_window_evidence_state(
+        {
+            "status": "reinforced",
+            "canary_evidence": {
+                "mature_trade_count": 20,
+                "required_trade_count": 20,
+            },
+        }
+    )
+    assert judged["state"] == "clear"
+
+
 def test_position_supervisor_advisories_skip_unexecutable_stop_legality(tmp_path):
     db_path = tmp_path / "state.db"
     _create_db(db_path)
@@ -946,3 +1063,54 @@ def test_position_supervisor_advisories_skip_unexecutable_stop_legality(tmp_path
     finally:
         conn.close()
     assert "fix_stop_legality" not in {row[0] for row in rows}
+
+
+def test_single_control_contract_rejects_inverted_or_undeclared_intent():
+    """A generated patch must move the control the way its intent declares.
+
+    The reflex generator reads its learning bounds from the profit_protection
+    base; when those bounds were missing the old lenient read clamped the
+    candidate to 0.0 - a "lift the trigger" candidate that lowered it.  The
+    bounds now live on the control's declaration and the contract refuses any
+    patch that moves against its declared direction.
+    """
+
+    base = get_position_supervisor_template(PROFIT_PROTECTION_TEMPLATE_ID)
+    assert base["learning_bounds"]["min_reflex_min_mfe"] == 3.0
+    assert base["learning_bounds"]["max_reflex_min_mfe"] == 12.0
+
+    inverted = _build_single_control_candidate_template(
+        day="2026-10-14",
+        action="reflex_trigger",
+        base_template_id=PROFIT_PROTECTION_TEMPLATE_ID,
+        control_path="reflex_policy.reflex_min_mfe",
+        candidate_value=0.0,
+        regime_stratum="range_capture",
+        generation_reason="reflex_trigger_too_low",
+        intent_direction="raise",
+    )
+    contract = _single_control_candidate_contract(inverted)
+    assert contract["ok"] is False
+    assert contract["reason"] == "candidate_direction_violates_intent"
+
+    raised = _build_single_control_candidate_template(
+        day="2026-10-14",
+        action="reflex_trigger",
+        base_template_id=PROFIT_PROTECTION_TEMPLATE_ID,
+        control_path="reflex_policy.reflex_min_mfe",
+        candidate_value=6.0,
+        regime_stratum="range_capture",
+        generation_reason="reflex_trigger_too_low",
+        intent_direction="raise",
+    )
+    assert _single_control_candidate_contract(raised)["ok"] is True
+
+    undeclared = dict(raised)
+    undeclared["candidate_patch"] = {
+        key: value
+        for key, value in raised["candidate_patch"].items()
+        if key != "intent_direction"
+    }
+    assert _single_control_candidate_contract(undeclared)["reason"] == (
+        "candidate_patch_intent_direction_missing"
+    )

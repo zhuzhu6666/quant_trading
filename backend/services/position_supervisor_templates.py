@@ -33,6 +33,15 @@ BINDING_APPLICATION_STATUSES = (
 # Matches default.v1.thresholds.min_thesis_break_seconds.
 MIN_THESIS_BREAK_SECONDS_FALLBACK = 900.0
 
+# The reflex ladder's learnable trigger bounds belong to the reflex control
+# itself, so every template that enables the ladder declares them from this one
+# place.  A generated reflex candidate must never fall back to a default when
+# these are missing: without them the generator cannot bound its patch.
+REFLEX_MIN_MFE_LEARNING_BOUNDS = {
+    "min_reflex_min_mfe": 3.0,
+    "max_reflex_min_mfe": 12.0,
+}
+
 # L1-6 quality gate for the regime_shift evidence family.
 REGIME_EVIDENCE_MIN_CONFIDENCE_FALLBACK = 0.6
 REGIME_EVIDENCE_MIN_OBSERVATIONS_FALLBACK = 2
@@ -384,8 +393,7 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "max_tp_extension_factor": 0.50,
             "min_profit_lock_multiplier": 0.35,
             "max_profit_lock_multiplier": 0.85,
-            "min_reflex_min_mfe": 3.0,
-            "max_reflex_min_mfe": 12.0,
+            **REFLEX_MIN_MFE_LEARNING_BOUNDS,
             "regime_evidence_min_confidence": REGIME_EVIDENCE_MIN_CONFIDENCE_FALLBACK,
             "regime_evidence_min_observations": REGIME_EVIDENCE_MIN_OBSERVATIONS_FALLBACK,
         },
@@ -456,6 +464,7 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "max_tp_extension_factor": 0.35,
             "min_profit_lock_multiplier": 0.30,
             "max_profit_lock_multiplier": 0.75,
+            **REFLEX_MIN_MFE_LEARNING_BOUNDS,
             "regime_evidence_min_confidence": REGIME_EVIDENCE_MIN_CONFIDENCE_FALLBACK,
             "regime_evidence_min_observations": REGIME_EVIDENCE_MIN_OBSERVATIONS_FALLBACK,
         },
@@ -522,6 +531,7 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "max_tp_extension_factor": 0.45,
             "min_profit_lock_multiplier": 0.45,
             "max_profit_lock_multiplier": 0.90,
+            **REFLEX_MIN_MFE_LEARNING_BOUNDS,
             "regime_evidence_min_confidence": REGIME_EVIDENCE_MIN_CONFIDENCE_FALLBACK,
             "regime_evidence_min_observations": REGIME_EVIDENCE_MIN_OBSERVATIONS_FALLBACK,
         },

@@ -1034,6 +1034,13 @@ _SUPERVISOR_TEMPLATE_CONTROL_SECTIONS = (
     "learning_bounds",
 )
 
+# A generated single-control candidate must move the control in the direction
+# its own generation reason declares.  The direction is declared where the
+# intent lives (the generator) and enforced where the candidate contract is
+# checked, so an inverted patch (for example a "lift the reflex trigger"
+# candidate that lowers it) can never reach the bridge or the executor.
+_CONTROL_INTENT_DIRECTIONS = frozenset({"raise", "lower"})
+
 
 def _nested_value(payload: Mapping[str, Any], path: str) -> tuple[bool, Any]:
     current: Any = payload
@@ -1066,7 +1073,8 @@ def _single_control_candidate_contract(
 
     The runtime template snapshot is intentionally complete so it can be
     restored after a restart.  The evidence contract, however, must prove
-    that only one control differs from the named base template.
+    that only one control differs from the named base template, and that the
+    patched value moves in the direction the generator declared as its intent.
     """
 
     candidate = dict(candidate_template or {})
@@ -1091,6 +1099,18 @@ def _single_control_candidate_contract(
         return {"ok": False, "reason": "candidate_patch_base_value_mismatch"}
     if patch.get("candidate_value") != candidate_value:
         return {"ok": False, "reason": "candidate_patch_value_mismatch"}
+    direction = str(patch.get("intent_direction") or "")
+    if direction not in _CONTROL_INTENT_DIRECTIONS:
+        return {"ok": False, "reason": "candidate_patch_intent_direction_missing"}
+    try:
+        base_number = float(base_value)
+        candidate_number = float(candidate_value)
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "candidate_patch_intent_direction_uncomparable"}
+    if direction == "raise" and candidate_number <= base_number:
+        return {"ok": False, "reason": "candidate_direction_violates_intent"}
+    if direction == "lower" and candidate_number >= base_number:
+        return {"ok": False, "reason": "candidate_direction_violates_intent"}
     base_controls: dict[str, Any] = {}
     candidate_controls: dict[str, Any] = {}
     for section in _SUPERVISOR_TEMPLATE_CONTROL_SECTIONS:
@@ -1134,7 +1154,11 @@ def _build_single_control_candidate_template(
     candidate_value: Any,
     regime_stratum: str,
     generation_reason: str,
+    intent_direction: str,
 ) -> dict[str, Any] | None:
+    direction = str(intent_direction or "")
+    if direction not in _CONTROL_INTENT_DIRECTIONS:
+        raise ValueError(f"unsupported_intent_direction:{direction or 'missing'}")
     base = get_position_supervisor_template(base_template_id)
     exists, base_value = _nested_value(base, control_path)
     if not exists:
@@ -1173,6 +1197,7 @@ def _build_single_control_candidate_template(
         "base_value": deepcopy(base_value),
         "candidate_value": deepcopy(candidate_value),
         "regime_stratum": regime_stratum,
+        "intent_direction": direction,
     }
     candidate["generation_context"] = {
         "schema_version": "position_supervisor_candidate_generation.v1",
@@ -2158,34 +2183,132 @@ def _supervisor_switch_delegation_enabled() -> bool:
         return False
 
 
-def _supervisor_observation_in_flight(*, db_path: str | Path) -> dict[str, Any]:
-    """Report whether this control surface still has an open observation window.
+def _closed_window_evidence_state(application: Mapping[str, Any]) -> dict[str, Any]:
+    """Classify the newest closed switch window's evidence sufficiency."""
+
+    status = str(application.get("status") or "")
+    canary = (
+        application.get("canary_evidence")
+        if isinstance(application.get("canary_evidence"), Mapping)
+        else {}
+    )
+    try:
+        required = int(canary.get("required_trade_count") or 0)
+        mature = int(canary.get("mature_trade_count") or 0)
+    except (TypeError, ValueError):
+        required = 0
+        mature = 0
+    patch: dict[str, Any] = {}
+    evidence = (
+        application.get("evidence")
+        if isinstance(application.get("evidence"), Mapping)
+        else {}
+    )
+    candidate = (
+        evidence.get("candidate_template")
+        if isinstance(evidence.get("candidate_template"), Mapping)
+        else {}
+    )
+    raw_patch = candidate.get("candidate_patch")
+    if isinstance(raw_patch, Mapping):
+        base_value = raw_patch.get("base_value")
+        candidate_value = raw_patch.get("candidate_value")
+        direction = str(raw_patch.get("intent_direction") or "")
+        if not direction:
+            try:
+                base_number = float(base_value)
+                candidate_number = float(candidate_value)
+            except (TypeError, ValueError):
+                direction = ""
+            else:
+                if candidate_number > base_number:
+                    direction = "raise"
+                elif candidate_number < base_number:
+                    direction = "lower"
+        patch = {
+            "path": str(raw_patch.get("path") or ""),
+            "direction": direction,
+            "base_value": base_value,
+            "candidate_value": candidate_value,
+        }
+    window: dict[str, Any] = {
+        "application_id": str(application.get("application_id") or ""),
+        "status": status,
+        "anchor_patch": patch,
+    }
+    if status == "inconclusive" and required > 0 and mature < required:
+        return {
+            **window,
+            "state": "evidence_insufficient",
+            "mature_trade_count": mature,
+            "required_trade_count": required,
+        }
+    return {**window, "state": "clear"}
+
+
+def _patch_repeats_observation_anchor(
+    candidate_template: Mapping[str, Any] | None,
+    observation_window: Mapping[str, Any],
+) -> bool:
+    """Return whether a candidate repeats the change its window failed to judge."""
+
+    if not isinstance(candidate_template, Mapping):
+        return False
+    anchor_patch = observation_window.get("anchor_patch")
+    if not isinstance(anchor_patch, Mapping):
+        return False
+    anchor_path = str(anchor_patch.get("path") or "")
+    if not anchor_path:
+        return False
+    candidate_patch = candidate_template.get("candidate_patch")
+    if not isinstance(candidate_patch, Mapping):
+        return False
+    if str(candidate_patch.get("path") or "") != anchor_path:
+        return False
+    anchor_direction = str(anchor_patch.get("direction") or "")
+    candidate_direction = str(candidate_patch.get("intent_direction") or "")
+    return bool(anchor_direction) and anchor_direction == candidate_direction
+
+
+def _supervisor_observation_window_state(*, db_path: str | Path) -> dict[str, Any]:
+    """Report this control surface's observation-window state.
 
     A switch replaces the running control immediately, so a second switch while
     the first window is still collecting terminalizes it on too few trades for
     the selection evidence policy to ever accept it.  The window's own clock
     (``observation_window_expired``) is what closes it; until then the surface
     owes that window an uninterrupted run.
+
+    A window that closes without enough mature samples to judge the change is
+    reported as ``evidence_insufficient`` together with the control it could
+    not measure, so the surface does not restart the same unjudgeable
+    experiment on the next cycle.
     """
     try:
         store = LearningApplicationStore(db_path)
+        anchor: dict[str, Any] | None = None
         for index, app in enumerate(store.iter_applications(scope_type="position_supervisor_template")):
             if index >= 20:
                 break
             if str(app.get("action") or "") != "switch_position_supervisor_template":
                 continue
-            if str(app.get("status") or "") in IN_FLIGHT_EFFECT_STATUSES:
+            status = str(app.get("status") or "")
+            if status in IN_FLIGHT_EFFECT_STATUSES:
                 return {
                     "state": "in_flight",
                     "application_id": str(app.get("application_id") or ""),
-                    "status": str(app.get("status") or ""),
+                    "status": status,
                 }
+            if anchor is None:
+                anchor = dict(app)
+        if anchor is None:
+            return {"state": "clear"}
+        return _closed_window_evidence_state(anchor)
     except Exception:
         # The gate throttles suggestion volume; it is not an authority boundary,
         # so an unreadable ledger keeps the existing advisory behavior and says
         # so instead of pretending the surface is clear.
         return {"state": "unknown"}
-    return {"state": "clear"}
 
 
 def build_position_supervisor_advisories(
@@ -2205,7 +2328,7 @@ def build_position_supervisor_advisories(
         counterfactual_summary = _counterfactual_summary(conn, day=day)
     finally:
         conn.close()
-    observation_window = _supervisor_observation_in_flight(db_path=db_path)
+    observation_window = _supervisor_observation_window_state(db_path=db_path)
     replay_summary = {
         "sample_count": replay.get("sample_count"),
         "comparison": replay.get("comparison"),
@@ -2230,16 +2353,33 @@ def build_position_supervisor_advisories(
         ).hexdigest()[:10]
         sl_policy = dict(base.get("sl_policy") or {})
         severity = min(1.0, max(0.0, avg_giveback))
-        learning_bounds = dict(base.get("learning_bounds") or {})
-        base_lock_multiplier = _safe_float(sl_policy.get("profit_lock_multiplier"), 0.60)
-        min_lock_multiplier = _safe_float(
-            learning_bounds.get("min_profit_lock_multiplier"),
-            0.35,
+        base_lock_exists, base_lock_multiplier = _nested_value(
+            base, "sl_policy.profit_lock_multiplier"
         )
-        max_lock_multiplier = _safe_float(
-            learning_bounds.get("max_profit_lock_multiplier"),
-            0.85,
+        min_lock_exists, min_lock_multiplier = _nested_value(
+            base, "learning_bounds.min_profit_lock_multiplier"
         )
+        max_lock_exists, max_lock_multiplier = _nested_value(
+            base, "learning_bounds.max_profit_lock_multiplier"
+        )
+        if not (base_lock_exists and min_lock_exists and max_lock_exists):
+            skipped.append(
+                {
+                    "action": "switch_position_supervisor_template",
+                    "reason": "tpsl_learning_bounds_unavailable",
+                    "target_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
+                    "evidence": {
+                        "day": day,
+                        "base_lock_present": bool(base_lock_exists),
+                        "min_lock_present": bool(min_lock_exists),
+                        "max_lock_present": bool(max_lock_exists),
+                    },
+                }
+            )
+            return None
+        base_lock_multiplier = _safe_float(base_lock_multiplier, 0.60)
+        min_lock_multiplier = _safe_float(min_lock_multiplier, 0.35)
+        max_lock_multiplier = _safe_float(max_lock_multiplier, 0.85)
         # A generated candidate changes exactly one management control.  The
         # posture state machine owns regime behavior; this patch only relaxes
         # the profit-lock multiplier when the counterfactual evidence says
@@ -2264,6 +2404,7 @@ def build_position_supervisor_advisories(
                 "base_value": round(base_lock_multiplier, 4),
                 "candidate_value": round(candidate_lock_multiplier, 4),
                 "regime_stratum": "range_capture",
+                "intent_direction": "lower",
             },
             "generation_context": {
                 "schema_version": "position_supervisor_candidate_generation.v1",
@@ -2304,11 +2445,33 @@ def build_position_supervisor_advisories(
         if int(capture_failed_count) <= 0:
             return None
         base = get_position_supervisor_template(PROFIT_PROTECTION_TEMPLATE_ID)
-        reflex_policy = dict(base.get("reflex_policy") or {})
-        learning_bounds = dict(base.get("learning_bounds") or {})
-        base_min_mfe = _safe_float(reflex_policy.get("reflex_min_mfe"), 3.0)
-        min_bound = _safe_float(learning_bounds.get("min_reflex_min_mfe"), base_min_mfe)
-        max_bound = _safe_float(learning_bounds.get("max_reflex_min_mfe"), base_min_mfe + 3.0)
+        base_min_mfe_exists, base_min_mfe = _nested_value(
+            base, "reflex_policy.reflex_min_mfe"
+        )
+        min_bound_exists, min_bound = _nested_value(
+            base, "learning_bounds.min_reflex_min_mfe"
+        )
+        max_bound_exists, max_bound = _nested_value(
+            base, "learning_bounds.max_reflex_min_mfe"
+        )
+        if not (base_min_mfe_exists and min_bound_exists and max_bound_exists):
+            skipped.append(
+                {
+                    "action": "switch_position_supervisor_template",
+                    "reason": "reflex_learning_bounds_unavailable",
+                    "target_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
+                    "evidence": {
+                        "day": day,
+                        "base_min_mfe_present": bool(base_min_mfe_exists),
+                        "min_bound_present": bool(min_bound_exists),
+                        "max_bound_present": bool(max_bound_exists),
+                    },
+                }
+            )
+            return None
+        base_min_mfe = _safe_float(base_min_mfe, 3.0)
+        min_bound = _safe_float(min_bound, base_min_mfe)
+        max_bound = _safe_float(max_bound, base_min_mfe + 3.0)
         severity = min(
             1.0,
             max(
@@ -2330,6 +2493,7 @@ def build_position_supervisor_advisories(
             candidate_value=candidate_min_mfe,
             regime_stratum="range_capture",
             generation_reason="reflex_trigger_too_low",
+            intent_direction="raise",
         )
 
     def _add(
@@ -2342,7 +2506,8 @@ def build_position_supervisor_advisories(
     ) -> None:
         candidate_template = evidence.get("candidate_template")
         if action == "switch_position_supervisor_template":
-            if observation_window.get("state") == "in_flight":
+            window_state = str(observation_window.get("state") or "")
+            if window_state == "in_flight":
                 skipped.append(
                     {
                         "action": action,
@@ -2352,6 +2517,22 @@ def build_position_supervisor_advisories(
                     }
                 )
                 return
+            if window_state == "evidence_insufficient" and _patch_repeats_observation_anchor(
+                candidate_template, observation_window
+            ):
+                skipped.append(
+                    {
+                        "action": action,
+                        "reason": "repeat_switch_without_evidence",
+                        "application_id": str(observation_window.get("application_id") or ""),
+                        "target_template_id": target_template_id,
+                        "anchor_patch": dict(observation_window.get("anchor_patch") or {}),
+                        "mature_trade_count": observation_window.get("mature_trade_count"),
+                        "required_trade_count": observation_window.get("required_trade_count"),
+                    }
+                )
+                return
+        if isinstance(candidate_template, Mapping):
             contract = _single_control_candidate_contract(candidate_template)
             if not contract.get("ok"):
                 skipped.append(
@@ -2508,6 +2689,7 @@ def build_position_supervisor_advisories(
                 ).get("thresholds", {}).get("giveback_reduce_threshold"),
                 regime_stratum="range_capture",
                 generation_reason="mfe_capture_failure",
+                intent_direction="lower",
             )
             if capture_candidate is None:
                 skipped.append(
@@ -2557,6 +2739,7 @@ def build_position_supervisor_advisories(
             ).get("thresholds", {}).get("min_thesis_break_seconds"),
             regime_stratum="transition_confirming",
             generation_reason="counterfactual_overprotection",
+            intent_direction="lower",
         )
         if relax_candidate is None:
             skipped.append(
@@ -2591,6 +2774,7 @@ def build_position_supervisor_advisories(
             ).get("thresholds", {}).get("min_thesis_break_seconds"),
             regime_stratum="transition_confirming",
             generation_reason="small_loss_replay",
+            intent_direction="lower",
         )
         if relax_candidate is not None:
             _add(
@@ -2620,6 +2804,7 @@ def build_position_supervisor_advisories(
             ).get("thresholds", {}).get("giveback_tighten_threshold"),
             regime_stratum="range_capture",
             generation_reason="historical_profit_protection_pressure",
+            intent_direction="lower",
         )
         if tighten_candidate is not None:
             _add(
@@ -2646,6 +2831,7 @@ def build_position_supervisor_advisories(
             ).get("thresholds", {}).get("min_thesis_break_seconds"),
             regime_stratum="transition_confirming",
             generation_reason="early_thesis_break_replay",
+            intent_direction="raise",
         )
         if hold_window_candidate is not None:
             _add(
