@@ -315,3 +315,17 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 已加载运行证据：2026-10-14 19:38:36 CST 受控重启（graceful、`overlay restored`、worktree 指纹 `688321f4… → e4f2719b…`）；① 19:46:01 归因任务 `trades=24 / −18.06 / primary=execution`（重启前恒 0）；② 19:39:44 tick 日志 `pnl_session=-14.45`、KV `available/14 笔/−14.45`（此前 5.5 天恒 0.00）。
 
 未完成运行证据：退役路径的日内重建需一笔真实平仓现查——`broker missing position retired pos=…` 出现后同一 tick 内 `live.session_state.<UTC 日>` 的 legs/pnl/`session_observed_at` 前进；失败按 `regressed` 登记。
+
+## 17. 自检闭环：意图不变式、源水位一致性哨兵、证据闸（2026-10-14 深夜）
+
+| 合同 | 权威 / 针对性证据 |
+|---|---|
+| 控制的学习边界只声明一次 | `position_supervisor_templates.REFLEX_MIN_MFE_LEARNING_BOUNDS`（3.0/12.0），default / conservative / profit_protection 三处引用；基础模板缺边界时生成器拒绝（`reflex_learning_bounds_unavailable` / `tpsl_learning_bounds_unavailable`），不再以 0.0 兜底 |
+| 候选必须符合声明的意图方向 | 生成器声明 `intent_direction`（`reflex_trigger`=raise、`mfe_capture_protection`/`overprotection_relief`/`relax_thesis_break`/`tighten_profit_protection`=lower、`increase_min_hold_window`=raise），判据只在 `_single_control_candidate_contract`（`candidate_direction_violates_intent` / `candidate_patch_intent_direction_missing`）；该判据同时被 V16 桥（`candidate_contract_not_ready`）、RiskPolicy（`invalid_single_control_supervisor_candidate`）与 learning 准入复用，因此旧的无方向候选无法再进执行链 |
+| 会话快照必须与当日权威平仓一致 | `live_close_settlement._session_projection_consistency_check`（5 分钟节流，挂在既有每 tick 兜底路径）：比对 `session_recorded_position_ids` 与 loader 的当日 `completed_position_ids`；不一致 ⇒ `session_risk_blockers` 标记 + 既有唯一 writer `restore_session_state_for_day` 重建 + 安全事件箱 `session_projection_mismatch_repaired/unrepaired`；无新鲜券商事实或事实不完整时沉默（不猜测） |
+| 样本不足不得重复无法度量的改动 | `_supervisor_observation_window_state` 三态（`in_flight` / `evidence_insufficient` / `clear`）；状态取自最近一个已收口切换窗的既有 `canary_evidence`（`mature_trade_count` vs `required_trade_count`）与 `status`；命中时同控制 + 同方向的切换候选进 `skipped`（`repeat_switch_without_evidence`），换方向或换控制仍放行 |
+| unknown/stale 语义未变 | 哨兵在缺新鲜事实时沉默；证据闸在无法判定方向时放行而不是猜测；`_safe_float` 的其他调用方未动 |
+
+定向验证：`test_single_control_contract_rejects_inverted_or_undeclared_intent`、`test_supervisor_switch_does_not_repeat_an_unjudged_change`、`test_closed_window_evidence_state_blocks_only_the_unjudged_control`、`test_session_projection_mismatch_rebuilds_and_records_audit`、`test_session_projection_check_keeps_silent_without_fresh_broker_facts`；既有 mfe-capture 用例新增 reflex 方向断言（旧代码 0.0 即红）。跨批回归 supervisor + live + canonical 族 159 passed。
+
+未完成运行证据：① reflex 候选首个真实落地（方向修正后重放）；② 19:26 旧候选在桥/Policy 复验处被 `candidate_patch_intent_direction_missing` 挡下的现查；③ 下一笔真实平仓触发的会话一致性与事件箱记录。
