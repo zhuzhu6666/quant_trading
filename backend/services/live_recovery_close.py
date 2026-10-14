@@ -132,6 +132,8 @@ class MissingPositionRetirementRuntime:
     replay_close: Callable[..., bool]
     mark_recovery_closed: Callable[..., None]
     remove_live_position_state: Callable[[int], None]
+    restore_session_state: Callable[..., bool]
+    trade_date: Callable[[], str]
     now: Callable[[], float]
     replay_lookback_seconds: int
     partial_context: str
@@ -395,6 +397,21 @@ def retire_broker_missing_position(
         },
     )
     runtime.remove_live_position_state(pid)
+    # This path also removes the position from the tick's close-detection
+    # inputs, so the session projection must be rebuilt from deals here.
+    try:
+        runtime.restore_session_state(
+            runtime.trade_date(),
+            broker_open_position_ids=set(live_ids),
+            confirmed_closed_position_ids={pid},
+        )
+    except Exception as exc:
+        runtime.debug(
+            "[live] session rebuild after missing-position retirement failed "
+            "for pos %s: %s",
+            pid,
+            exc,
+        )
     if log:
         log(f"broker missing position retired pos={pid}: {reason}")
     return True

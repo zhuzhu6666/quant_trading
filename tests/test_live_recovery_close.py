@@ -214,6 +214,8 @@ def _retirement_runtime(**overrides):
         "replay_close": lambda **_kwargs: True,
         "mark_recovery_closed": lambda *_args, **_kwargs: None,
         "remove_live_position_state": lambda _position_id: None,
+        "restore_session_state": lambda *_args, **_kwargs: True,
+        "trade_date": lambda: "2026-10-14",
         "now": lambda: 200.0,
         "replay_lookback_seconds": 60,
         "partial_context": "partial",
@@ -326,6 +328,52 @@ def test_retirement_replays_then_marks_and_removes_missing_position():
     assert order[2] == ("remove", 14)
     assert messages == [
         "broker missing position retired pos=14: POSITION_NOT_FOUND"
+    ]
+
+
+def test_retirement_rebuilds_session_risk_after_missing_close():
+    """Retirement must rebuild the session projection it consumes.
+
+    Retiring a broker-missing position removes it from the tick's close
+    detection inputs, so without this rebuild the day's settled PnL stays
+    frozen at its last value.
+    """
+
+    rebuilt = []
+    real_pnl = {
+        "net": 2.5,
+        "exec_timestamp": 150.0,
+        "deal_id": 46,
+        "source": "ctrader_deals",
+    }
+    runtime, _connection = _retirement_runtime(
+        read_positions=lambda _bridge: [{"position_id": 99}],
+        sync_close_deals_batch=lambda *_args, **_kwargs: {16: real_pnl},
+        replay_close=lambda **_kwargs: True,
+        restore_session_state=lambda *args, **kwargs: rebuilt.append(
+            (args, kwargs)
+        ),
+        trade_date=lambda: "2026-10-14",
+    )
+
+    result = retire_broker_missing_position(
+        SimpleNamespace(),
+        16,
+        broker="ctrader",
+        strategy_name="factor_v4",
+        reason="POSITION_NOT_FOUND",
+        runtime=runtime,
+    )
+
+    assert result is True
+    assert rebuilt == [
+        (
+            ("2026-10-14",),
+            {
+                "broker_open_position_ids": {99},
+                "confirmed_closed_position_ids": {16},
+            },
+        )
     ]
 
 

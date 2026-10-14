@@ -1662,6 +1662,8 @@ def retire_broker_missing_position(
             replay_close=_replay_recovered_close,
             mark_recovery_closed=mark_recovery_position_closed,
             remove_live_position_state=_remove_live_position_state,
+            restore_session_state=restore_session_state_for_day,
+            trade_date=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             now=time.time,
             replay_lookback_seconds=_RECOVERY_REPLAY_LOOKBACK_SEC,
             partial_context=_live_service()._RECOVERY_CONTEXT_PARTIAL,
