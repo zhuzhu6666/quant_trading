@@ -314,7 +314,7 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 
 已加载运行证据：2026-10-14 19:38:36 CST 受控重启（graceful、`overlay restored`、worktree 指纹 `688321f4… → e4f2719b…`）；① 19:46:01 归因任务 `trades=24 / −18.06 / primary=execution`（重启前恒 0）；② 19:39:44 tick 日志 `pnl_session=-14.45`、KV `available/14 笔/−14.45`（此前 5.5 天恒 0.00）。
 
-未完成运行证据：退役路径的日内重建需一笔真实平仓现查——`broker missing position retired pos=…` 出现后同一 tick 内 `live.session_state.<UTC 日>` 的 legs/pnl/`session_observed_at` 前进；失败按 `regressed` 登记。
+未完成运行证据（2026-10-14 23:1x 现查更新）：退役路径的日内重建**已收口**——19:38:36 加载后两笔平仓（净 +16.28）使 `live.session_state.<UTC 日>` 由 14 笔推进到 16 笔、`session_observed_at` 20:43:53，无冻结；本批新增的一致性哨兵加载后与权威集合一致（安全事件箱 `session_projection_mismatch*` 计数 0）。
 
 ## 17. 自检闭环：意图不变式、源水位一致性哨兵、证据闸（2026-10-14 深夜）
 
