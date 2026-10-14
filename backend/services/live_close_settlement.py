@@ -1757,6 +1757,107 @@ def _repair_session_start_balance_from_account(*, persist: bool = True) -> float
 
 
 
+_SESSION_PROJECTION_CHECK_MIN_INTERVAL_SECONDS = 300.0
+_session_projection_check_last_at: float = 0.0
+
+
+def _session_projection_consistency_check(
+    *,
+    now: float | None = None,
+    force: bool = False,
+) -> dict[str, Any] | None:
+    """Compare the session snapshot with the day's authoritative closes.
+
+    The session projection advances only when its owner rebuilds it: a closed
+    position consumed by any path that forgets to rebuild leaves the snapshot
+    fresh-looking but wrong.  This sentinel compares the positions the snapshot
+    recorded with the positions whose final close is inside the current UTC day
+    and repairs through the existing writer.  It is a detector, not a second
+    authority: the rebuild remains the single writer, and a missing fresh
+    broker-open set or an unproven deal stream keeps it silent instead of
+    guessing.
+    """
+
+    global _session_projection_check_last_at
+
+    checked_at = float(now if now is not None else time.time())
+    if (
+        not force
+        and checked_at - _session_projection_check_last_at
+        < _SESSION_PROJECTION_CHECK_MIN_INTERVAL_SECONDS
+    ):
+        return None
+    _session_projection_check_last_at = checked_at
+
+    broker_open_position_ids = fresh_cached_broker_open_position_ids()
+    if broker_open_position_ids is None:
+        return None
+    trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    trades = _load_authoritative_session_trades(
+        trade_date,
+        "UTC",
+        broker_open_position_ids=broker_open_position_ids,
+    )
+    if trades is None:
+        return None
+    authoritative_ids = {
+        int(item.get("position_id") or 0)
+        for item in trades
+        if int(item.get("position_id") or 0) > 0
+    }
+    recorded_ids = {
+        int(position_id)
+        for position_id in (
+            live_state_get("session_recorded_position_ids", [], clone=True) or []
+        )
+        if int(position_id or 0) > 0
+    }
+    missing = sorted(authoritative_ids - recorded_ids)
+    extra = sorted(recorded_ids - authoritative_ids)
+    if not missing and not extra:
+        return None
+    live_state_update(
+        session_risk_blockers=[
+            f"session_projection_mismatch:{missing or extra}",
+        ]
+    )
+    logger.warning(
+        "[live] session projection mismatch: snapshot={} authoritative={} "
+        "missing={} extra={}",
+        sorted(recorded_ids),
+        sorted(authoritative_ids),
+        missing,
+        extra,
+    )
+    rebuilt = bool(
+        restore_session_state_for_day(
+            trade_date,
+            broker_open_position_ids=set(broker_open_position_ids),
+            confirmed_closed_position_ids=set(missing),
+        )
+    )
+    append_safety_outbox(
+        event_type=(
+            "session_projection_mismatch_repaired"
+            if rebuilt
+            else "session_projection_mismatch_unrepaired"
+        ),
+        payload={
+            "trade_date": trade_date,
+            "missing_position_ids": missing,
+            "extra_position_ids": extra,
+            "rebuilt": rebuilt,
+        },
+        error="" if rebuilt else "authoritative_session_restore_unavailable",
+    )
+    return {
+        "trade_date": trade_date,
+        "missing_position_ids": missing,
+        "extra_position_ids": extra,
+        "rebuilt": rebuilt,
+    }
+
+
 def evaluate_daily_drawdown(risk_limits: RiskLimitSnapshot | None = None) -> dict:
     limits = risk_limits or RiskLimitSnapshot.from_runtime_config()
     session_pnl = float(live_state_get("session_pnl", 0.0) or 0.0)
@@ -1812,6 +1913,7 @@ def evaluate_daily_drawdown(risk_limits: RiskLimitSnapshot | None = None) -> dic
     live_state_update(**updates)
     if updates:
         _persist_session_state()
+    _session_projection_consistency_check()
     return {
         "tripped": tripped,
         "dd_pct": dd_pct,

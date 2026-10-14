@@ -700,3 +700,85 @@ def test_degraded_cache_retains_original_session_observation(monkeypatch):
 
     assert live_service.live_state_get("session_state_status") == "degraded_cache"
     assert live_service.live_state_get("session_observed_at") == 4321.0
+
+
+def test_session_projection_mismatch_rebuilds_and_records_audit(monkeypatch):
+    """A snapshot that missed a day close must be detected and repaired.
+
+    The session projection only advances through its writer; a close consumed
+    by a path that forgets to rebuild leaves the snapshot fresh-looking but
+    wrong.  The sentinel compares the recorded positions with the day's
+    authoritative closes and repairs through the same writer.
+    """
+
+    monkeypatch.setattr(live_close_settlement, "_session_projection_check_last_at", 0.0)
+    monkeypatch.setattr(
+        live_close_settlement, "fresh_cached_broker_open_position_ids", lambda: {9}
+    )
+    monkeypatch.setattr(
+        live_close_settlement,
+        "_load_authoritative_session_trades",
+        lambda *_args, **_kwargs: [{"position_id": 1}, {"position_id": 2}],
+    )
+    state = {"session_recorded_position_ids": [1], "session_risk_blockers": []}
+    monkeypatch.setattr(
+        live_close_settlement,
+        "live_state_get",
+        lambda key, default=None, **_kwargs: state.get(key, default),
+    )
+    monkeypatch.setattr(
+        live_close_settlement,
+        "live_state_update",
+        lambda **kwargs: state.update(kwargs),
+    )
+    rebuilt = []
+    monkeypatch.setattr(
+        live_close_settlement,
+        "restore_session_state_for_day",
+        lambda *args, **kwargs: rebuilt.append((args, kwargs)) or True,
+    )
+    outbox = []
+    monkeypatch.setattr(
+        live_close_settlement,
+        "append_safety_outbox",
+        lambda **kwargs: outbox.append(kwargs),
+    )
+
+    result = live_close_settlement._session_projection_consistency_check(
+        now=1_000_000.0, force=True
+    )
+
+    assert result["missing_position_ids"] == [2]
+    assert result["extra_position_ids"] == []
+    assert result["rebuilt"] is True
+    assert state["session_risk_blockers"] == ["session_projection_mismatch:[2]"]
+    assert rebuilt[0][1]["broker_open_position_ids"] == {9}
+    assert rebuilt[0][1]["confirmed_closed_position_ids"] == {2}
+    assert outbox[0]["event_type"] == "session_projection_mismatch_repaired"
+
+    # A second probe inside the interval must not rebuild again.
+    assert live_close_settlement._session_projection_consistency_check(
+        now=1_000_100.0
+    ) is None
+    assert len(rebuilt) == 1
+
+
+def test_session_projection_check_keeps_silent_without_fresh_broker_facts(monkeypatch):
+    monkeypatch.setattr(live_close_settlement, "_session_projection_check_last_at", 0.0)
+    monkeypatch.setattr(
+        live_close_settlement, "fresh_cached_broker_open_position_ids", lambda: None
+    )
+    rebuilt = []
+    monkeypatch.setattr(
+        live_close_settlement,
+        "restore_session_state_for_day",
+        lambda *args, **kwargs: rebuilt.append(args) or True,
+    )
+
+    assert (
+        live_close_settlement._session_projection_consistency_check(
+            now=1_000_000.0, force=True
+        )
+        is None
+    )
+    assert rebuilt == []
