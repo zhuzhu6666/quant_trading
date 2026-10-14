@@ -1177,6 +1177,48 @@ def test_reader_latest_review_prefers_learning_revision_and_keeps_history() -> N
         conn.close()
 
 
+def test_reader_review_read_limit_keeps_newest_reviews() -> None:
+    """A bounded review read keeps the newest logical reviews, not the oldest.
+
+    The drawdown attribution aggregates the trailing window from this read, so
+    a limit that kept the oldest reviews reported an empty window once the
+    review history passed the cap.
+    """
+
+    from backend.services.canonical_v2_reader import iter_reviews
+
+    conn = _canonical_sqlite()
+    try:
+        for index in range(5):
+            record_review(
+                conn,
+                review_id=f"rv_limit_{index}",
+                trade_id=f"trade_limit_{index}",
+                position_id=f"pos_limit_{index}",
+                pnl=float(index),
+                outcome_label="good_win",
+                summary_text=f"review {index}",
+                created_at=1_728_500_000.0 + index,
+            )
+
+        bounded = iter_reviews(conn, limit=2)
+        assert [item["review_id"] for item in bounded] == [
+            "rv_limit_3",
+            "rv_limit_4",
+        ]
+
+        everything = iter_reviews(conn, limit=0)
+        assert [item["review_id"] for item in everything] == [
+            "rv_limit_0",
+            "rv_limit_1",
+            "rv_limit_2",
+            "rv_limit_3",
+            "rv_limit_4",
+        ]
+    finally:
+        conn.close()
+
+
 def test_reader_latest_review_same_observed_at_uses_event_id_tie_breaker() -> None:
     from backend.services.canonical_v2_reader import read_review, review_resolution_evidence
 

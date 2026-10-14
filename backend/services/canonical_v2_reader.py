@@ -195,9 +195,9 @@ def _review_event_rows(
     """Read review event metadata with latest selection in SQL.
 
     The default path returns one row per logical review using the same
-    ``(observed_at, event_id)`` ordering as the resolver.  ``latest_only=False``
-    is reserved for metadata-only lineage fallback; it never restores old
-    payload blobs.
+    ``(observed_at, event_id)`` ordering as the resolver; a positive ``limit``
+    keeps the newest logical reviews.  ``latest_only=False`` is reserved for
+    metadata-only lineage fallback; it never restores old payload blobs.
     """
     if not _canonical_ready(conn):
         return []
@@ -219,10 +219,11 @@ def _review_event_rows(
     )
     if latest_only:
         ranked += "WHERE review_rank=1 "
-    ranked += "ORDER BY observed_at ASC, event_id ASC"
     if limit and int(limit) > 0:
-        ranked += " LIMIT ?"
+        ranked += "ORDER BY observed_at DESC, event_id DESC LIMIT ?"
         params.append(int(limit))
+    else:
+        ranked += "ORDER BY observed_at ASC, event_id ASC"
     rows = conn.execute(
         sql(
             conn,
