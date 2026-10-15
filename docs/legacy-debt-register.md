@@ -129,7 +129,15 @@
 
 ## 2. 执行与运行时
 
-本域暂无未退出条目（2026-09-14：`recovery_position_state.attribution_integrity` 首平仓验证通过转 resolved，追溯走 Git 与分期状态页 §2/§3.10）。
+### entry-protection 闩锁在 broker-missing 平仓消费路径无释放（2026-10-15 登记；同日代码已修并加载，待首笔平仓验证）
+
+- 状态：`monitoring`（代码已写、全量回归通过；**2026-10-15 08:35:09 三服务受控重启已加载**，未提交）。
+- 事实（10-14 20:40 事故）：持仓 297086635 的 SL/TP amend 未验证（同一秒 `get_positions` 10s 超时）激活 `entry_protection_pending/297086635` + `("safety_freshness","entry_protection")` 两条 cause；20:43:24 该仓被券商平仓（+18.83）后由 `retire_broker_missing_position` 消费（恢复行 `broker_position_not_found`、`retired_at=20:43:53.8`），该路径无释放 ⇒ `no_new_risk` 锁定 **11h13m**（readiness `ready_for_live_execution=false`、system_health degraded、每 5 分钟开仓 SKIP）；与 10-02 事故 295077652（3.5 天、310 次 skip）同模式。生产实测近 12 笔平仓全部由退役路径消费、账本 `actor=system:position_close` 记录 **0 条** ⇒ 2bf45bd 的释放接线（只接 `cleanup_closed_position`）从未在产线触发。
+- 修复（本批）：`replay_recovered_close`（退役 + 启动恢复回放共用）在权威 deal 提交投影后调用 `release_pending_entry_protection`（`RecoveredCloseReplayRuntime` 必需字段，两构造点同步）；`entry_protection` cause 激活时绑定 `metadata.position_id`，释放判据 `_release_projection_unverified_cause_for_position` 只释放绑定命中该持仓的活跃 cause（未绑定/绑定他仓保持封锁）；释放只作用于活跃 cause（空释放不写账本）。`cleanup_closed_position` 与 `replay_recovered_close` 两个消费点共用同一释放函数，判据无第二套。
+- 证据：`tests/test_live_entry_protection.py` + `tests/test_live_recovery_close.py` 21 passed（绑定释放 / 他仓不释放 / 失败保持封锁 / 提交后调用与参数）；close/recovery/session/open-protection/latch 族 89 + lifecycle/tick/safety-ordering 族 129 + `pytest -m smoke` 216；全量回归 3014 passed / 11 skipped。
+- 退出条件：受控重启加载后首笔由退役/回放路径消费且带绑定 cause 的平仓——账本出现 `system:position_close` 释放记录、无残留闩锁（事故当日 08:07:14 操作者解闸已完成，本项只验证自动释放接线）。
+
+本域其余条目：无（2026-09-14：`recovery_position_state.attribution_integrity` 首平仓验证通过转 resolved，追溯走 Git 与分期状态页 §2/§3.10）。
 
 ## 3. 治理、研究与客户端
 

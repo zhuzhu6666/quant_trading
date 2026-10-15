@@ -329,3 +329,16 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 定向验证：`test_single_control_contract_rejects_inverted_or_undeclared_intent`、`test_supervisor_switch_does_not_repeat_an_unjudged_change`、`test_closed_window_evidence_state_blocks_only_the_unjudged_control`、`test_session_projection_mismatch_rebuilds_and_records_audit`、`test_session_projection_check_keeps_silent_without_fresh_broker_facts`；既有 mfe-capture 用例新增 reflex 方向断言（旧代码 0.0 即红）。跨批回归 supervisor + live + canonical 族 159 passed。
 
 未完成运行证据：① reflex 候选首个真实落地（方向修正后重放）；② 19:26 旧候选在桥/Policy 复验处被 `candidate_patch_intent_direction_missing` 挡下的现查；③ 下一笔真实平仓触发的会话一致性与事件箱记录。
+
+## 18. entry-protection 闩锁在平仓消费路径的释放（2026-10-15）
+
+| 合同 | 权威 / 针对性证据 |
+|---|---|
+| broker-missing 平仓消费必须释放该持仓的 entry-protection cause | `replay_recovered_close`（`live_recovery_close.py`，退役与启动恢复回放共用）在权威 deal 提交投影后调用 `runtime.release_pending_entry_protection(position_id, close_reason=<解析原因>, close_ts, total_pnl)`；`RecoveredCloseReplayRuntime` 新增必需字段，缺省构造直接失败；`tests/test_live_recovery_close.py` 断言调用顺序（提交后）与精确参数（去掉调用即红） |
+| projection-unverified cause 必须有持仓绑定才可释放 | 激活点 `record_amend_failure_after_fill` 写入 `metadata.position_id`；释放判据 `live_entry_protection._release_projection_unverified_cause_for_position` 仅释放 `("safety_freshness","entry_protection")` 且绑定 pid == 本次持仓的活跃 cause；绑定他仓或未绑定保持封锁（fail-closed） |
+| 释放只作用于活跃 cause | `release_entry_protection_pending_latch_after_broker_close` 先读闩锁状态，仅对活跃 cause 调 release；无活跃 cause 的空释放不写账本（append-only 体积治理） |
+| 释放失败不阻断平仓归因 | 释放异常被捕获返回 False，`no_new_risk` 保持封锁（安全方向）；`cleanup_closed_position` 与 `replay_recovered_close` 两个消费点共用同一释放函数，判据无第二套 |
+
+定向验证：`tests/test_live_entry_protection.py`（pending 释放 + 绑定 companion 释放 + 他仓绑定不释放 + 释放失败保持封锁 + verified 路径 companion 释放）；`tests/test_live_recovery_close.py`（回放顺序与参数）；close/recovery/session/open-protection/latch 族 89 passed + lifecycle/tick/safety-ordering 族 129 passed + `pytest -m smoke` 216 passed。
+
+未完成运行证据：**已加载**（2026-10-15 08:35:09 三服务受控重启；readiness `ready=true`、release identity 两端一致）——待首笔由退役/回放路径消费的平仓：账本应出现 `actor=system:position_close` 的释放记录（pending 与/或绑定 companion），且不残留闩锁；加载前生产实测（近 12 笔平仓全部 `broker_position_not_found`、账本 `system:position_close` 记录 0 条）证明此前该释放从未触发。
