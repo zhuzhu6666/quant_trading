@@ -108,6 +108,7 @@ class RecoveredCloseReplayRuntime:
     build_payloads: Callable[..., dict[str, Any]]
     mark_recovery_closed: Callable[..., None]
     release_close_latch: Callable[[int, dict[str, Any] | None], Any]
+    release_pending_entry_protection: Callable[..., bool]
     get_risk_state: Callable[[], dict[str, Any]]
     now: Callable[[], float]
     partial_context: str
@@ -197,6 +198,12 @@ def replay_recovered_close(
         ),
     )
     runtime.release_close_latch(int(position_id), real_pnl)
+    runtime.release_pending_entry_protection(
+        position_id,
+        close_reason=resolved_close_reason,
+        close_ts=close_ts,
+        total_pnl=total_pnl,
+    )
 
     exit_decision_id = ""
     if runtime.ledger and close_price is not None:

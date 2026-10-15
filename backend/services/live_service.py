@@ -1389,6 +1389,7 @@ def _release_entry_protection_pending_latch_after_broker_close(
         close_ts=close_ts,
         total_pnl=total_pnl,
         release_latch_cause=release_no_new_risk_latch_cause,
+        latch_status=no_new_risk_latch_status,
     )
 
 

@@ -23,6 +23,7 @@ def _replay_runtime(**overrides):
         },
         "mark_recovery_closed": lambda *_args, **_kwargs: None,
         "release_close_latch": lambda *_args, **_kwargs: None,
+        "release_pending_entry_protection": lambda *_args, **_kwargs: None,
         "get_risk_state": lambda: {},
         "now": lambda: 101.0,
         "partial_context": "partial",
@@ -107,6 +108,9 @@ def test_replay_unknown_price_skips_audit_and_learning_but_commits_recovery():
                 "recovery"
             ),
             release_close_latch=lambda *_args: order.append("release"),
+            release_pending_entry_protection=lambda *_args, **_kwargs: order.append(
+                "entry_protection"
+            ),
             ledger=_Ledger(),
             trade_reviewer=_Reviewer(),
             experience_builder=object(),
@@ -115,7 +119,37 @@ def test_replay_unknown_price_skips_audit_and_learning_but_commits_recovery():
     )
 
     assert result is True
-    assert order == ["recovery", "release"]
+    assert order == ["recovery", "release", "entry_protection"]
+
+
+def test_replay_releases_entry_protection_with_the_resolved_close_facts():
+    calls = []
+
+    result = replay_recovered_close(
+        broker="ctrader",
+        position_id=11,
+        position_state={"position_id": 11},
+        real_pnl={"net": -4.0},
+        strategy_name="factor_v4",
+        runtime=_replay_runtime(
+            release_pending_entry_protection=lambda *args, **kwargs: calls.append(
+                (args, kwargs)
+            )
+            or True,
+        ),
+    )
+
+    assert result is True
+    assert calls == [
+        (
+            (11,),
+            {
+                "close_reason": "chain_broken",
+                "close_ts": 100.0,
+                "total_pnl": -4.0,
+            },
+        )
+    ]
 
 
 def test_replay_ignores_durable_supervisor_reason_without_broker_evidence():

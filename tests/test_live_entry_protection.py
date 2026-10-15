@@ -13,16 +13,20 @@ def _runtime(
     pending=None,
     outbox=None,
     state_updates=None,
+    latch_status=None,
 ):
     outbox = outbox if outbox is not None else []
     state_updates = state_updates if state_updates is not None else []
     return EntryProtectionLatchRuntime(
         activate_latch=activate or (lambda **_kwargs: None),
         release_latch_cause=release or (lambda **_kwargs: None),
-        latch_status=lambda **_kwargs: {
-            "active": True,
-            "reason": "entry_protection_pending",
-        },
+        latch_status=latch_status
+        or (
+            lambda **_kwargs: {
+                "active": True,
+                "reason": "entry_protection_pending",
+            }
+        ),
         append_safety_outbox=lambda **kwargs: outbox.append(kwargs) or {},
         live_state_update=lambda **kwargs: state_updates.append(kwargs),
         reconcile_value=lambda payload, key, default=None: payload.get(
@@ -110,6 +114,40 @@ def test_fresh_broker_proof_releases_only_matching_cause():
     assert pending_state["verified_at"] == 1_234.0
 
 
+def test_fresh_broker_proof_releases_the_bound_unverified_projection_cause():
+    releases = []
+    runtime = _runtime(
+        release=lambda **kwargs: releases.append(kwargs),
+        latch_status=lambda **_kwargs: {
+            "active": True,
+            "causes": [
+                {
+                    "cause": "safety_freshness",
+                    "cause_id": "entry_protection",
+                    "metadata": {"position_id": 90},
+                }
+            ],
+        },
+    )
+
+    release_entry_protection_pending_latch(
+        90,
+        reconcile={"reconcile_id": "rec-1", "observed_at": 1_200.0},
+        expected_stop_loss=2_300.0,
+        expected_take_profit=2_500.0,
+        runtime=runtime,
+    )
+
+    assert [item["cause"] for item in releases] == [
+        "entry_protection_pending",
+        "safety_freshness",
+    ]
+    assert releases[1]["cause_id"] == "entry_protection"
+    assert releases[1]["reason"] == (
+        "entry_protection_projection_verified_by_fresh_broker_reconcile"
+    )
+
+
 def test_release_failure_keeps_pending_attach_and_new_risk_blocked():
     outbox = []
     state_updates = []
@@ -153,6 +191,19 @@ def test_broker_close_releases_the_pending_cause_for_that_position_only():
         close_ts=1_793.0,
         total_pnl=-7.94,
         release_latch_cause=lambda **kwargs: releases.append(kwargs),
+        latch_status=lambda **_kwargs: {
+            "active": True,
+            "causes": [
+                {
+                    "cause": "entry_protection_pending",
+                    "cause_id": "295077652",
+                },
+                {
+                    "cause": "entry_protection_pending",
+                    "cause_id": "4242",
+                },
+            ],
+        },
     )
 
     assert released is True
@@ -166,6 +217,62 @@ def test_broker_close_releases_the_pending_cause_for_that_position_only():
     assert releases[0]["evidence"]["authoritative_close_deal"] is True
 
 
+def test_broker_close_releases_the_bound_unverified_projection_cause():
+    releases = []
+
+    released = release_entry_protection_pending_latch_after_broker_close(
+        297086635,
+        close_reason="broker_close",
+        close_ts=1_792.0,
+        total_pnl=18.83,
+        release_latch_cause=lambda **kwargs: releases.append(kwargs),
+        latch_status=lambda **_kwargs: {
+            "active": True,
+            "causes": [
+                {
+                    "cause": "safety_freshness",
+                    "cause_id": "entry_protection",
+                    "metadata": {"position_id": 297086635},
+                }
+            ],
+        },
+    )
+
+    assert released is True
+    assert [item["cause"] for item in releases] == ["safety_freshness"]
+    assert releases[0]["cause_id"] == "entry_protection"
+    assert releases[0]["actor"] == "system:position_close"
+    assert releases[0]["reason"] == (
+        "entry_protection_projection_unresolved_position_closed"
+    )
+    assert releases[0]["evidence"]["position_id"] == 297086635
+
+
+def test_broker_close_keeps_unverified_cause_bound_to_another_position():
+    releases = []
+
+    released = release_entry_protection_pending_latch_after_broker_close(
+        297086635,
+        close_reason="broker_close",
+        close_ts=1_792.0,
+        total_pnl=18.83,
+        release_latch_cause=lambda **kwargs: releases.append(kwargs),
+        latch_status=lambda **_kwargs: {
+            "active": True,
+            "causes": [
+                {
+                    "cause": "safety_freshness",
+                    "cause_id": "entry_protection",
+                    "metadata": {"position_id": 111},
+                }
+            ],
+        },
+    )
+
+    assert released is False
+    assert releases == []
+
+
 def test_broker_close_release_never_fails_closed_position_attribution():
     def unavailable(**_kwargs):
         raise RuntimeError("latch ledger unavailable")
@@ -176,6 +283,15 @@ def test_broker_close_release_never_fails_closed_position_attribution():
         close_ts=1_800.0,
         total_pnl=1.0,
         release_latch_cause=unavailable,
+        latch_status=lambda **_kwargs: {
+            "active": True,
+            "causes": [
+                {
+                    "cause": "entry_protection_pending",
+                    "cause_id": "4242",
+                }
+            ],
+        },
     )
 
     assert released is False

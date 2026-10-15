@@ -1134,6 +1134,11 @@ def test_record_amend_failure_after_fill_records_context_status_and_ledger(monke
             "blockers": ("entry_protection_unverified",),
             "source": "entry_protection",
             "error": "bad stops",
+            "metadata": {
+                "position_id": 268,
+                "broker": "ctrader",
+                "action": "amend_position_sltp",
+            },
         }
     ]
 

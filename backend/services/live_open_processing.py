@@ -403,6 +403,11 @@ def record_amend_failure_after_fill(
                 or request.ledger_action_reason
                 or "entry_protection_failed"
             ),
+            metadata={
+                "position_id": int(request.pid or 0),
+                "broker": str(request.broker or ""),
+                "action": "amend_position_sltp",
+            },
         )
     except Exception as exc:
         try:

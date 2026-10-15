@@ -1579,6 +1579,12 @@ def _replay_recovered_close(
             build_payloads=_lifecycle_build_replayed_close_payloads,
             mark_recovery_closed=mark_recovery_position_closed,
             release_close_latch=release_session_close_deal_latch,
+            release_pending_entry_protection=(
+                lambda *args, **kwargs: _live_service()
+                ._release_entry_protection_pending_latch_after_broker_close(
+                    *args, **kwargs
+                )
+            ),
             get_risk_state=lambda: (
                 live_state_get("risk", {}, clone=True) or {}
             ),
