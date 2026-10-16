@@ -408,7 +408,7 @@ journalctl -u quant-learning-worker --grep "mem (after|before)" --since "1 hour 
 - worker `mem` 分段日志口径（`logs/debug.log`）：`[governance] mem after catalog/redundancy` 的 `rss=`/`hwm=` 是每轮证据；hwm 只增不减，**单看 hwm 不能判泄漏**，要同轮看 `rss=` 回落（正常治理窗口结束应回到 300~450MB）。
 - 危险信号：zram `DATA` 接近 2G 且压缩比明显劣化（<2x）、`available` <300Mi 持续、worker `rss` 在高位不回落——此时先排除新变更，再考虑升实例规格（**不要**先加进程级内存上限）。
 - 变更 zram：`sudo systemctl disable --now zram.service` 即回退；disksize/压缩算法在 unit 的 `ExecStart` 内调整后 `daemon-reload`。
-- 待收敛项：autonomous 轮驻留爆点（HWM 仍触 ~2.9GB）见 [legacy-debt-register.md](legacy-debt-register.md)「学习 worker 内存瞬时峰」条目，退出线未达前本条 SOP 保持有效。
+- 该爆点已按 2026-10-10 证据结案（登记册条目已移除，追溯走 Git `83efda02`→`9c975424`→`a7d67a8d`）：autonomous 轮驻留峰 ~2.85GB 在 zram 兜底下为受控瞬态、24h 零 OOM、无 +300MB/h 棘轮；本条水位与 zram 处置继续执行，若将来取消 zram 或提高并发需重启该项评估。
 
 ## 9. 交易循环排查 SOP
 

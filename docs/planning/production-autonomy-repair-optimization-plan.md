@@ -495,3 +495,27 @@ pg_job_queue_v2_enabled=false
 - 生命周期：用 `demote_to_shadow`、降权、退休等既有收紧命令，不直接写 lifecycle/overlay 表。
 - execution intent：UNKNOWN 保持 no-new-risk，恢复只由 broker reconcile/intent recovery 消解。
 - schema：forward-only additive repair；不依赖 destructive down migration，也不回填猜测 lineage。
+
+## 14. 2026-10-16 净删除批（旧债清理排期）
+
+本节是本计划的追加实施批次记录，不建立第二份活跃方案。来源 = [legacy-debt-register.md](../legacy-debt-register.md) 中四条删除型旧债；目标是把"替代已运行、只待删旧"的兼容/重复实现按登记册的验收口径逐项删除。裁决日 2026-10-30：到期未执行或未完成，按登记册裁决日规则三选一（结案 / 顺延并写原因 / 转 dormant）。
+
+### 14.1 批次清单与顺序
+
+| 顺序 | 登记册条目 | 删除对象 | 前置/验证要求 |
+|---|---|---|---|
+| 1 | 组件状态判定仍有三处平行读取者（09-19 登记） | `live_safety_planner.py` / `live_loop_v2.py` / `live_supervision_runtime.py` 中的同义组件状态解析（统一调用 `position_component_state`） | 先跑既有 safety plane/planner 测试作等价基线；不改判定结果、不新增门控；reason code 不变 |
+| 2 | meta 环收敛期退役清单（09-05）第 4 项 | `backend/services/` 单调用方壳层内联（先出 <120 行文件清单再动） | 内联前后调用方语义不变；净删除为正 |
+| 3 | shadow/discovered/live 生命周期兼容（数据前置 09-27 已满足） | native builtin fallback 的读取者（`factor_cards._factor_ids` 等族候选） | 批前跑等价性探针证明卡片/健康/选择面输出不变 |
+| 4 | 平行 authority、重复门控和无退出兼容层（09-27 可删清单） | (a) `live_safety_plane` 配置 off/shadow 腿（保留运行时 `forced_shadow`）；(b) `governance_mutation_coordinator_v2_mode` 旗标与三处回退；(c) `phased_repair_release_gate` 模块 | (a) 触碰 Safety ⇒ 独立子批并先跑 safety 等价基线；(c) 删除必须同批重取 `execution_outcome_fault_matrix` attestation |
+
+### 14.2 边界
+
+- 不新增表/列/迁移/开关/调度/服务/wrapper；不为删除引入兼容层或新抽象。
+- 每项独立验证、独立回滚；批次不保留"半删"状态（要么删净、要么不动）。
+- 与本清单无关的重构不做；发现更高权重新债权时先改登记册，再决定是否顺延本批。
+
+### 14.3 验收
+
+- 每项：定向测试绿 + 全量回归绿 + 等价性/调用链证据 + `git diff --stat` 净删除为正。
+- 批次完成：四项删除完成并同步登记册（条目按"已完成旧债不在本文保留"移除，追溯走 Git）。
