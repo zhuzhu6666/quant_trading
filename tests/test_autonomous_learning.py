@@ -3114,6 +3114,85 @@ def test_demo_factor_apply_supersedes_non_actionable_weight(monkeypatch):
     assert reviewed[0][0:2] == ("ps_flat", "superseded")
 
 
+def test_demo_factor_apply_supersedes_below_demo_min_live_weight(monkeypatch):
+    """A downweight clamped by the bounded-demo floor must not stay pending."""
+
+    class _Rows:
+        def fetchall(self):
+            return [
+                {
+                    "suggestion_id": "ps_below_floor",
+                    "scope_key": "floor_factor",
+                    "action": "downweight",
+                    "evidence_json": json.dumps(
+                        {
+                            "source_agent": "autonomous_learning",
+                            "expected_effect": {"suggested_target_weight": 0.025},
+                        }
+                    ),
+                }
+            ]
+
+    class _Conn:
+        def close(self):
+            pass
+
+    class _Config:
+        autonomy_mode = "demo_nursery"
+        factor_portfolio_weights = {"floor_factor": 0.05}
+        factor_signal_config = {}
+
+    class _Authority:
+        def evaluate_scope_write(self, *args, **kwargs):
+            return {"allowed": True}
+
+    class _WeightService:
+        def execute(self, **kwargs):
+            return {
+                "status": "no_admitted_change",
+                "weight_normalizations": {
+                    "floor_factor": {
+                        "reason": "balanced_demo_min_live_weight",
+                        "requested_weight": 0.025,
+                        "effective_weight": 0.05,
+                    }
+                },
+                "applications": {},
+                "mutation": {},
+            }
+
+    reviewed = []
+
+    class _Governor:
+        def set_status(self, suggestion_id, status, note=""):
+            reviewed.append((suggestion_id, status, note))
+            return True
+
+    monkeypatch.setattr(al, "_connect", lambda *_args, **_kwargs: _Conn())
+    monkeypatch.setattr(al, "_execute", lambda *_args, **_kwargs: _Rows())
+    monkeypatch.setattr(rc, "shared", lambda: _Config())
+    monkeypatch.setattr(
+        "research.learning.governor.RuleEvolutionGovernor",
+        _Governor,
+    )
+    monkeypatch.setattr(
+        "backend.services.agent_authority.AgentAuthorityRegistryService",
+        lambda *args, **kwargs: _Authority(),
+    )
+    monkeypatch.setattr(
+        "backend.services.factor_weight_change.FactorWeightChangeService",
+        _WeightService,
+    )
+
+    result = al._apply_approved_factor_suggestions_for_demo(experiment_id="exp_floor")
+
+    assert result["actionable_attempted"] == 0
+    assert result["superseded"] == 1
+    assert result["items"][0]["status"] == "superseded_below_demo_min_live_weight"
+    assert reviewed[0][0:2] == ("ps_below_floor", "superseded")
+    assert "minimum_live_weight" in reviewed[0][2]
+
+
 def test_demo_autonomy_respects_non_demo_mode(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     monkeypatch.setattr(al, "autonomy_mode", lambda: "manual")

@@ -270,13 +270,17 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
         ),
     )
     if _env_enabled("QUANT_AUTONOMOUS_EVOLUTION_NURSERY_RUNNER", "1"):
+        # The :12 autonomous_learning cycle runs 845s p50 (max ~1072s).  The
+        # old :17 start plus the shared 480s lock-wait budget always expired
+        # at :25, so the nursery was skipped and replay never refreshed.
+        # Start after the :12 cycle releases the lock, before the :42 cycle.
         nursery_cron = str(
             getattr(
                 _runtime_shared(),
                 "autonomous_evolution_nursery_cron",
-                "17 * * * *",
+                "32 * * * *",
             )
-            or "17 * * * *"
+            or "32 * * * *"
         )
 
         def _run_nursery_cycle() -> None:

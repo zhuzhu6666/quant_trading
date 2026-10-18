@@ -5348,6 +5348,31 @@ def _apply_approved_factor_suggestions_for_demo(*, experiment_id: str, limit: in
             },
             source_agent="factor_governance",
         )
+        if str(result.get("status") or "") == "no_admitted_change":
+            normalization = dict(result.get("weight_normalizations") or {}).get(factor) or {}
+            if str(normalization.get("reason") or "") == "balanced_demo_min_live_weight":
+                note = (
+                    "superseded without apply: requested weight "
+                    f"{normalization.get('requested_weight')} is below bounded demo "
+                    f"minimum_live_weight {normalization.get('effective_weight')}; "
+                    "unactionable approved row would block the learning workload gate"
+                )
+                governor.set_status(suggestion_id, "superseded", note)
+                # Nothing was admitted; do not let this row report as an
+                # actionable blocker for the surrounding sync step.
+                actionable_attempted = max(0, actionable_attempted - 1)
+                items.append(
+                    {
+                        "suggestion_id": suggestion_id,
+                        "factor": factor,
+                        "status": "superseded_below_demo_min_live_weight",
+                        "old_weight": old_weight,
+                        "target_weight": target_weight,
+                        "requested_weight": normalization.get("requested_weight"),
+                        "effective_weight": normalization.get("effective_weight"),
+                    }
+                )
+                continue
         items.append(
             {
                 "suggestion_id": suggestion_id,
@@ -5427,8 +5452,10 @@ def _auto_apply_parameter_template_suggestions(
 ) -> dict[str, Any]:
     from backend.services.parameter_templates import ParameterTemplateService
     from backend.services.v16_command_gate import V16CommandGate
+    from research.learning.governor import RuleEvolutionGovernor
 
     service = ParameterTemplateService(str(db_path))
+    governor = RuleEvolutionGovernor(str(db_path))
     conn = _connect(db_path, read_only=True)
     applied = []
     skipped = []
@@ -5475,6 +5502,19 @@ def _auto_apply_parameter_template_suggestions(
             candidate_id=candidate_id,
         )
         if not v16_authority.get("allowed"):
+            if not candidate_id:
+                note = (
+                    "superseded without apply: evidence has no candidate_id; "
+                    f"V16 gate returned {v16_authority.get('status') or 'v16_command_required'}; "
+                    "orphaned approved row would block the learning workload gate"
+                )
+                governor.set_status(suggestion_id, "superseded", note)
+                skipped.append({
+                    "suggestion_id": suggestion_id,
+                    "reason": "superseded_no_candidate_id",
+                    "v16_authority": v16_authority,
+                })
+                continue
             skipped.append({
                 "suggestion_id": suggestion_id,
                 "reason": str(v16_authority.get("status") or "v16_command_required"),

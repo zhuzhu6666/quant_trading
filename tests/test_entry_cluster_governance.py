@@ -143,3 +143,49 @@ def test_demo_applies_entry_cluster_cooldown_as_committed_mutation(tmp_path, mon
     # Idempotent: the applied row is no longer eligible.
     again = service.apply_next_cooldown(run_id="pytest-entry-cluster-2")
     assert again["status"] == "skipped_no_eligible_entry_cluster_suggestion"
+
+    # A duplicate approved row for a scope that already has an active
+    # application must be terminalized, not left to block the workload gate.
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason,
+             evidence_json, status, governance_eligible,
+             governance_eligibility_version, governance_eligibility_fingerprint,
+             governance_ineligible_reason, created_at)
+            VALUES ('ec-duplicate', 'entry_cluster', 'same_direction_ge_1',
+                    'increase_same_direction_cooldown', 0.8, 'duplicate',
+                    ?, 'approved', 1, ?, 'fingerprint-duplicate', '', ?)
+            """,
+            (
+                json.dumps(
+                    {
+                        "bucket": "same_direction_ge_1",
+                        "recommended_controls": {
+                            "increase_same_direction_cooldown": True,
+                            "raise_pyramid_entry_threshold": False,
+                            "advisory_only": True,
+                        },
+                    }
+                ),
+                GOVERNANCE_ELIGIBILITY_VERSION,
+                time.time(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    duplicate = service.apply_next_cooldown(run_id="pytest-entry-cluster-3")
+    assert duplicate["status"] == "skipped_active_entry_cluster_experiment"
+    assert duplicate["superseded_suggestion_id"] == "ec-duplicate"
+    conn = sqlite3.connect(db_path)
+    try:
+        duplicate_status = conn.execute(
+            "SELECT status FROM policy_suggestion WHERE suggestion_id='ec-duplicate'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert duplicate_status == "superseded"

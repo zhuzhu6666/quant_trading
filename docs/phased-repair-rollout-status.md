@@ -357,6 +357,19 @@ Unresolved live evidence: 加载后首笔由退役/回放路径消费且有绑�
 Next batch: 首笔真实平仓现查（自动释放记录）；提交
 ```
 
+**本批（2026-10-18 早间：治理 pending 解卡 + nursery 调度错峰；未改 live 权重/模板）**：
+
+```text
+Batch: ① 23 条 approved 未 apply 的 policy_suggestion 经 governor 标记 superseded（14 factor 目标 0.025/0.0445 低于 bounded demo 0.05 下限；8 parameter_template 无 candidate_id，V16 恒 v16_command_required；1 entry_cluster 与 09-13 已 committed 的 gmut_5c0b3daa… 同 scope 重复）；② apply 侧硬化：factor no_admitted_change + balanced_demo_min_live_weight、parameter v16_command_required + 无 candidate_id、entry_cluster 同 scope 已有 active application 的重复建议均在当轮 supersede；③ nursery cron :17 → :32，避开 autonomous_learning :12 周期与 480s 等锁预算的结构冲突。
+Canonical authority: 建议终态仍由 RuleEvolutionGovernor.set_status 写；apply 仍走既有 FactorWeightChangeService / ParameterTemplateService / V16CommandGate；未新增第二套 apply 或判断。
+Deleted paths: 无删除；不新增表/迁移/开关/调度器/阈值。
+Root cause: 23 条结构性不可执行或重复的 approved 建议让 learning_workload_gate 在闭市时恒返回 run_pending_governance；开市时 autonomous_learning p50 845s/max 1071.7s 又让 nursery 在 :17 + 480s 内必然等不到锁，replay 自 10-15 11:24 起未刷新。
+Targeted verification: 新增/更新 3 个终端化用例；tests/test_autonomous_learning.py + test_governance_contract_convergence.py + test_factor_autonomy_hardening.py + test_factor_weight_change_service.py 110 passed；test_learning_worker_capability.py + test_autonomous_evolution_cycle.py 39 passed；py_compile 通过。
+Runtime verification: 08:39:11 / 08:47:12 CST 两次三服务受控重启（第二次加载 entry_cluster 重复建议终态化；预检：无 running evolution_run、job 队列空闲、gate=skip_closed_no_new_facts、无活动 latch）；启动 overlay restored、health db/ctrader connected、nursery 注册 32 * * * *；08:42 autonomous_learning 0.3s 早退，gate 仍 skip_closed_no_new_facts。
+Unresolved live evidence: autonomous_learning 时长未降；replay 仍 2.88 天 stale、posture shadow_only、ready_for_release=false；需周一开市后首个 :32 nursery 验证 replay 刷新与 posture 回升；system:position_close 释放证据仍未命中。
+Next batch: 周一开市后现查首个 :32 nursery 的 replay 报告时间、posture 和 gate；若 nursery 仍被 skip，再处理 autonomous_learning 的 845s 时长本体（已登记定位）。
+```
+
 ## 3. 未完成 / 待复核证据
 
 1. **完整生命周期闭环**：S7.6 终验标准已达成并持续（基准 `trade_review_outcome full/1.0 46`，`2026-08-21 → 08-28`）；后续只做常态观察，当前计数、skip/rejected 双轨与 supervisor trace 分级以现查 `canonical_v2` 为准。

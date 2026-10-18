@@ -486,7 +486,7 @@ def test_learning_worker_registers_factor_governance_job(monkeypatch):
     ) in registered
     assert any(
         name == "autonomous_evolution_nursery"
-        and cron == "17 * * * *"
+        and cron == "32 * * * *"
         for name, cron, _fn in registered
     )
     assert any(

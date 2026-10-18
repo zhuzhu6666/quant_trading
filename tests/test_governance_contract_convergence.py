@@ -302,6 +302,76 @@ def test_parameter_apply_forwards_v16_identity_without_copying_evidence(monkeypa
     assert calls[0]["v16_evidence_fingerprint"] == "e" * 64
 
 
+def test_parameter_apply_supersedes_approved_row_without_candidate(monkeypatch, tmp_path):
+    import backend.services.autonomous_learning as autonomous_learning
+    import backend.services.parameter_templates as parameter_templates
+    import backend.services.v16_command_gate as v16_command_gate
+    from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
+
+    db_path = _db(tmp_path)
+    evidence = (
+        '{"factor_id":"factor-a","target_template_id":"template-new",'
+        '"regime_key":"default","boundary":{"recommended_scope":"online_light"}}'
+    )
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            """INSERT INTO policy_suggestion
+               (suggestion_id, scope_type, scope_key, action, evidence_json,
+                status, governance_eligible, governance_eligibility_version,
+                governance_eligibility_fingerprint, created_at)
+               VALUES (?, 'parameter_template', 'online_light',
+                       'switch_parameter_template', ?, 'approved', 1, ?, ?, ?)""",
+            (
+                "parameter-no-candidate",
+                evidence,
+                GOVERNANCE_ELIGIBILITY_VERSION,
+                "f" * 64,
+                time.time(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    class FakeParameterTemplates:
+        def __init__(self, _db_path):
+            pass
+
+        def get_active_template(self, *, factor_id, regime_key):
+            return {"template_id": "template-old"}
+
+    monkeypatch.setattr(parameter_templates, "ParameterTemplateService", FakeParameterTemplates)
+    monkeypatch.setattr(
+        v16_command_gate.V16CommandGate,
+        "authorize",
+        staticmethod(
+            lambda *_args, **_kwargs: {
+                "allowed": False,
+                "status": "v16_command_required",
+            }
+        ),
+    )
+
+    result = autonomous_learning._auto_apply_parameter_template_suggestions(
+        db_path=db_path,
+        experiment_id="parameter-no-candidate",
+        limit=1,
+    )
+    assert result["applied"] == []
+    assert result["skipped"][0]["reason"] == "superseded_no_candidate_id"
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        status, note = conn.execute(
+            "SELECT status, review_note FROM policy_suggestion WHERE suggestion_id=?",
+            ("parameter-no-candidate",),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert status == "superseded"
+    assert "candidate_id" in note
+
+
 def test_supervisor_bootstrap_does_not_require_post_mutation_effect(tmp_path):
     db_path = _db(tmp_path)
     candidate = {

@@ -85,7 +85,7 @@ class EntryClusterGovernanceService:
         ensure_autonomous_learning_tables(self.db_path)
         from research.learning.governor import RuleEvolutionGovernor
 
-        RuleEvolutionGovernor(str(self.db_path))
+        governor = RuleEvolutionGovernor(str(self.db_path))
         cfg = runtime_config()
         mode = str(getattr(cfg, "autonomy_mode", "manual") or "manual")
         if not runtime_config_module.bounded_demo_mode_active(cfg):
@@ -121,10 +121,17 @@ class EntryClusterGovernanceService:
 
         active = self._active_application(scope_key)
         if active:
+            note = (
+                "superseded without apply: active entry_cluster application "
+                f"{active.get('application_id') or ''} already owns scope "
+                f"{scope_key}; a duplicate row would block the learning workload gate"
+            )
+            governor.set_status(suggestion_id, "superseded", note)
             return {
                 "ok": True,
                 "status": "skipped_active_entry_cluster_experiment",
                 "active_application": active,
+                "superseded_suggestion_id": suggestion_id,
                 "boundary": self.boundary(),
             }
 
@@ -341,8 +348,6 @@ class EntryClusterGovernanceService:
             item = dict(row)
             scope_key = str(item.get("scope_key") or "")
             if entry_cluster_threshold(scope_key) <= 0:
-                continue
-            if self._active_application(scope_key):
                 continue
             return item
         return {}
